@@ -1,11 +1,5 @@
-"""Rule checks: move legality, free-threes, double-three forbidden move."""
-
 from board import DIRECTIONS, EMPTY
 
-
-# A free-three is a shape that, if left unblocked, promotes to an open four.
-# We describe them as fixed-length patterns where 'X' is the player's stone
-# and '.' is empty. The placed stone must be one of the 'X' cells.
 FREE_THREE_PATTERNS = (
     ".XXX.",
     ".XX.X.",
@@ -44,7 +38,7 @@ def _direction_makes_free_three(board, r, c, dr, dc, color):
     for pattern in FREE_THREE_PATTERNS:
         plen = len(pattern)
         for start in range(len(line) - plen + 1):
-            if line[start : start + plen] != pattern:
+            if line[start:start + plen] != pattern:
                 continue
             offset = center - start
             if 0 <= offset < plen and pattern[offset] == "X":
@@ -75,9 +69,6 @@ def is_legal(board, r, c, color):
         return False, "Out of bounds"
     if not board.is_empty(r, c):
         return False, "Cell already occupied"
-    # A double-three that is created *by capturing* is explicitly allowed by
-    # the subject (see appendix note). We take the simple reading: if the
-    # move produces any capture at all, we skip the double-three check.
     captures = board.find_captures(r, c, color)
     if not captures and count_free_threes(board, r, c, color) >= 2:
         return False, "Forbidden double-three"

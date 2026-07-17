@@ -1,13 +1,13 @@
-"""Game state: turn order, timers, capture counts, win detection."""
-
 import time
 
 from board import BLACK, WHITE, EMPTY, STONE_NAME, Board, opponent
 from rules import is_legal
 
+CAPTURE_WIN_THRESHOLD = 10
+
 
 class Game:
-    """Drives a single hotseat game between two players.
+    """Drives a game between two players.
 
     Win conditions handled:
     - A player captures 10 opponent stones -> immediate win by capture.
@@ -30,15 +30,39 @@ class Game:
         self.last_captured = []
         self._turn_started = time.perf_counter()
 
-    def _switch(self):
-        self.current = opponent(self.current)
-        self._turn_started = time.perf_counter()
+    # ---------- queries ----------
+
+    def is_over(self):
+        return self.winner is not None
 
     def elapsed_current_turn(self):
         return time.perf_counter() - self._turn_started
 
-    def is_over(self):
-        return self.winner is not None
+    def is_pending_defense(self):
+        return self.pending_alignment_owner == opponent(self.current)
+
+    def winner_name(self):
+        return STONE_NAME.get(self.winner)
+
+    def _times(self, color=None):
+        if color is None:
+            return self.move_times[BLACK] + self.move_times[WHITE]
+        return self.move_times[color]
+
+    def average_time(self, color=None):
+        times = self._times(color)
+        if not times:
+            return 0.0
+        return sum(times) / len(times)
+
+    def last_move_time(self, color):
+        times = self.move_times[color]
+        return times[-1] if times else None
+
+    def move_count(self, color=None):
+        return len(self._times(color))
+
+    # ---------- move flow ----------
 
     def play(self, r, c):
         """Attempt a move; return (success, message)."""
@@ -50,11 +74,23 @@ class Game:
         if not legal:
             return False, reason
 
-        # Record the time spent thinking BEFORE mutating state so that a
-        # failed move (rejected above) never gets timed.
+        self._record_move_time(mover)
+        self._apply_move(r, c, mover)
+
+        if self._check_capture_win(mover):
+            return True, ""
+        if self._resolve_pending_alignment(mover):
+            return True, ""
+
+        self._register_new_alignments(mover)
+        self._switch()
+        return True, ""
+
+    def _record_move_time(self, mover):
         duration = time.perf_counter() - self._turn_started
         self.move_times[mover].append(duration)
 
+    def _apply_move(self, r, c, mover):
         self.board.set(r, c, mover)
         captured = self.board.find_captures(r, c, mover)
         for pr, pc in captured:
@@ -63,60 +99,39 @@ class Game:
         self.last_move = (r, c)
         self.last_captured = list(captured)
 
-        # Immediate win by capture takes precedence over anything else,
-        # including any pending 5-alignment by the opponent.
-        if self.captures[mover] >= 10:
-            self.winner = mover
-            self.win_reason = "capture"
-            return True, ""
+    def _check_capture_win(self, mover):
+        if self.captures[mover] < CAPTURE_WIN_THRESHOLD:
+            return False
+        self._declare_winner(mover, "capture")
+        return True
 
-        # If the opponent had a pending alignment, this move was their
-        # single chance to break it. Anything still intact wins for them.
-        if self.pending_alignment_owner == opponent(mover):
-            owner = self.pending_alignment_owner
-            still_intact = any(
-                all(self.board.get(pr, pc) == owner for pr, pc in aln)
-                for aln in self.pending_alignment
-            )
-            if still_intact:
-                self.winner = owner
-                self.win_reason = "alignment"
-                return True, ""
-            self.pending_alignment_owner = None
-            self.pending_alignment = None
+    def _resolve_pending_alignment(self, mover):
+        owner = self.pending_alignment_owner
+        if owner != opponent(mover):
+            return False
+        if self._alignment_still_intact(owner):
+            self._declare_winner(owner, "alignment")
+            return True
+        self.pending_alignment_owner = None
+        self.pending_alignment = None
+        return False
 
-        # Does the mover themselves have a fresh 5+ alignment? Store it;
-        # it will be resolved on the opponent's next move.
-        my_alignments = self.board.find_all_alignments(mover)
-        if my_alignments:
+    def _alignment_still_intact(self, owner):
+        return any(
+            all(self.board.get(pr, pc) == owner for pr, pc in aln)
+            for aln in self.pending_alignment
+        )
+
+    def _register_new_alignments(self, mover):
+        alignments = self.board.find_all_alignments(mover)
+        if alignments:
             self.pending_alignment_owner = mover
-            self.pending_alignment = my_alignments
+            self.pending_alignment = alignments
 
-        self._switch()
-        return True, ""
+    def _declare_winner(self, winner, reason):
+        self.winner = winner
+        self.win_reason = reason
 
-    def average_time(self, color=None):
-        if color is None:
-            times = self.move_times[BLACK] + self.move_times[WHITE]
-        else:
-            times = self.move_times[color]
-        if not times:
-            return 0.0
-        return sum(times) / len(times)
-
-    def last_move_time(self, color):
-        if not self.move_times[color]:
-            return None
-        return self.move_times[color][-1]
-
-    def move_count(self, color=None):
-        if color is None:
-            return len(self.move_times[BLACK]) + len(self.move_times[WHITE])
-        return len(self.move_times[color])
-
-    def is_pending_defense(self):
-        """True if the current player is under a pending-alignment threat."""
-        return self.pending_alignment_owner == opponent(self.current)
-
-    def winner_name(self):
-        return STONE_NAME.get(self.winner)
+    def _switch(self):
+        self.current = opponent(self.current)
+        self._turn_started = time.perf_counter()

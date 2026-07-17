@@ -1,10 +1,3 @@
-"""Board state and low-level stone operations.
-
-The board is a 19x19 grid indexed as `grid[row][col]` where `row = 0` is the
-top row and `col = 0` is the left column. Cells hold one of `EMPTY`, `BLACK`
-or `WHITE`.
-"""
-
 EMPTY = 0
 BLACK = 1
 WHITE = 2
@@ -12,13 +5,8 @@ BOARD_SIZE = 19
 
 STONE_NAME = {BLACK: "Black", WHITE: "White"}
 
-# The four axes on which alignments (and captures) can occur. We only need
-# one direction per axis; the reverse is handled by scanning both ways when
-# needed.
 DIRECTIONS = [(1, 0), (0, 1), (1, 1), (1, -1)]
 
-# All 8 unit vectors around a cell — used when scanning for captures because
-# a capture pattern can start in any of the 8 directions from the placed stone.
 ALL_DIRECTIONS = [
     (dr, dc)
     for dr in (-1, 0, 1)
@@ -28,7 +16,9 @@ ALL_DIRECTIONS = [
 
 
 def opponent(color):
-    return WHITE if color == BLACK else BLACK
+    if color == BLACK:
+        return WHITE
+    return BLACK
 
 
 class Board:
@@ -49,7 +39,7 @@ class Board:
         return self.in_bounds(r, c) and self.grid[r][c] == EMPTY
 
     def find_captures(self, r, c, color):
-        """Return the positions that get captured if `color` is placed at (r, c).
+        """Return positions captured if `color` is placed at (r, c).
 
         A capture flanks exactly two adjacent opponent stones on a line —
         pattern is (color, opp, opp, color) starting from the placed stone.
