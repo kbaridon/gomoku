@@ -22,7 +22,7 @@ install:
 	@$(PIP) install -r requirements.txt
 
 clean:
-	@rm -rf __pycache__ */__pycache__
+	@rm -rf __pycache__ */__pycache__ .pytest_cache
 
 fclean: clean
 	@rm -rf $(VENV)
