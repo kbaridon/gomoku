@@ -213,36 +213,8 @@ profondeur terminée**.
 free-three sans le bloquer, ta pondération "menace adverse" est trop
 faible. Si elle joue défensif alors qu'elle peut gagner, l'inverse.
 
----
 
-## Phase 7 — Optimisations avancées (bonus)
-
-Utile si tu veux atteindre profondeur 6+ dans les 500 ms.
-
-### À comprendre
-- **Zobrist hashing** : chaque case × chaque couleur = un nombre
-  aléatoire 64 bits fixé au démarrage. Le hash d'une position = XOR de
-  toutes les cases occupées. Update en O(1) par coup.
-- **Table de transposition** : un `dict[hash] = (depth, score, flag)`.
-  Si tu revois une position déjà explorée à profondeur ≥ à celle
-  demandée, tu récupères le score cached. Massive gain sur les
-  transpositions (le même état atteint par des chemins différents).
-- **Killer moves** / **history heuristic** : booster l'ordering en
-  gardant en mémoire les coups qui ont causé des coupures à d'autres
-  branches.
-- **Threat-space search** (spécifique Gomoku) : ne considérer que les
-  coups qui créent OU bloquent une menace. Réduit dramatiquement le
-  branching.
-
-### À coder (si le temps)
-- [ ] Zobrist keys initialisées au boot.
-- [ ] TT avec eviction simple (dict borné, ou remplacer si depth plus
-      profond).
-- [ ] Killer table `[depth] -> (r, c)`.
-
----
-
-## Phase 8 — Suggestion de coup + IA vs IA (½ journée)
+## Phase 7 — Suggestion de coup + IA vs IA (½ journée)
 
 - [ ] **Hint mode** : bouton "Hint" dans l'UI. Appelle `choose_move()`
       pour le joueur humain courant, affiche le coup en surbrillance
@@ -256,7 +228,7 @@ Utile si tu veux atteindre profondeur 6+ dans les 500 ms.
 
 ---
 
-## Phase 9 — Validation finale
+## Phase 8 — Validation finale
 
 - [ ] IA vs IA aléatoire : ton IA doit gagner ~100% des parties.
 - [ ] IA vs joueur amateur : ton IA doit gagner la majorité.
@@ -267,28 +239,3 @@ Utile si tu veux atteindre profondeur 6+ dans les 500 ms.
 - [ ] Tester les cas limites : alignement en attente à défendre,
       capture obligatoire pour survivre, position 9/10 captures.
 
----
-
-## Ressources conseillées
-
-- Russell & Norvig, *Artificial Intelligence: A Modern Approach*, chap.
-  5 (Adversarial Search) — la référence.
-- [Chessprogramming Wiki](https://www.chessprogramming.org) — écrit
-  pour les échecs mais 90% s'applique au Gomoku (alpha-beta, iterative
-  deepening, TT, Zobrist, killer moves).
-- Article "Go-Moku and Threat-Space Search" (Allis, 1993) — le papier
-  historique sur la résolution de Gomoku. Pas obligatoire mais culture
-  G.
-- Regarder le code d'un moteur Gomoku open-source (ex: Yixin,
-  Rapfi) — juste pour l'organisation, pas pour copier.
-
----
-
-## Ordre de priorité si tu manques de temps
-
-Version minimale acceptable pour la soutenance 42 : **Phases 0 → 5 +
-Phase 8**. Une eval Phase 6 basique (juste comptage d'alignements) est
-suffisante si le pruning et l'iterative deepening tournent bien.
-
-Les Phases 6 (heuristique fine) et 7 (Zobrist/TT) font la différence
-entre une IA qui "joue" et une IA qui "gagne".
