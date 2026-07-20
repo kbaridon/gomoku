@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyBboxPatch, Rectangle
 from matplotlib.widgets import Button
 
+from ai import choose_move
 from board import BLACK, BOARD_SIZE, EMPTY, STONE_NAME, WHITE
 
 
@@ -39,8 +40,12 @@ def fmt_time(t):
 
 
 class GomokuUI:
-    def __init__(self, game):
+    def __init__(self, game, players=None):
         self.game = game
+        self.players = players or {BLACK: "human", WHITE: "human"}
+        # Hint is available whenever at least one player is human.
+        self.hint_enabled = "human" in self.players.values()
+        self._hint = None
         self._status_msg = ""
         self._status_kind = "info"
 
@@ -49,8 +54,14 @@ class GomokuUI:
 
         self.board_ax = self.fig.add_axes([0.03, 0.06, 0.55, 0.90])
         self.info_ax = self.fig.add_axes([0.60, 0.14, 0.37, 0.82])
-        self.reset_ax = self.fig.add_axes([0.60, 0.03, 0.17, 0.07])
-        self.quit_ax = self.fig.add_axes([0.80, 0.03, 0.17, 0.07])
+        if self.hint_enabled:
+            self.reset_ax = self.fig.add_axes([0.60, 0.03, 0.12, 0.07])
+            self.hint_ax = self.fig.add_axes([0.735, 0.03, 0.12, 0.07])
+            self.quit_ax = self.fig.add_axes([0.87, 0.03, 0.10, 0.07])
+        else:
+            self.reset_ax = self.fig.add_axes([0.60, 0.03, 0.17, 0.07])
+            self.hint_ax = None
+            self.quit_ax = self.fig.add_axes([0.80, 0.03, 0.17, 0.07])
 
         self._setup_buttons()
         self._setup_board_ax()
@@ -82,6 +93,13 @@ class GomokuUI:
         )
         self.reset_btn.on_clicked(lambda _e: self._reset())
         self.quit_btn.on_clicked(lambda _e: plt.close(self.fig))
+
+        if self.hint_ax is not None:
+            self.hint_btn = Button(
+                self.hint_ax, "Hint (H)",
+                color="#D4E4EA", hovercolor="#B8D0DA",
+            )
+            self.hint_btn.on_clicked(lambda _e: self._show_hint())
 
     def _setup_board_ax(self):
         ax = self.board_ax
@@ -215,6 +233,15 @@ class GomokuUI:
         if self.game.last_move is not None:
             r, c = self.game.last_move
             self._draw_last_move_marker(r, c)
+        if self._hint is not None and not self.game.is_over():
+            self._draw_hint_marker(*self._hint)
+
+    def _draw_hint_marker(self, r, c):
+        self.board_ax.add_patch(Circle(
+            (c, r), 0.42,
+            facecolor="none", edgecolor=ACCENT,
+            linewidth=2.4, linestyle="--", zorder=5,
+        ))
 
     def _draw_stone(self, r, c, color):
         self.board_ax.add_patch(Circle(
@@ -410,11 +437,38 @@ class GomokuUI:
     def _tick(self):
         if self.game.is_over():
             return
+        if self._is_ai_turn():
+            self._ai_play()
+            return
         self._draw_info()
         self.fig.canvas.draw_idle()
 
+    def _is_ai_turn(self):
+        return self.players.get(self.game.current) == "ai"
+
+    def _ai_play(self):
+        move = choose_move(self.game)
+        if move is None:
+            self._set_status("AI has no legal move.", "error")
+            self._draw_all()
+            return
+        r, c = move
+        ok, msg = self.game.play(r, c)
+        if not ok:
+            self._set_status(f"AI produced illegal move: {msg}", "error")
+        else:
+            self._hint = None
+        self._draw_all()
+
+    def _show_hint(self):
+        if self.game.is_over() or self._is_ai_turn():
+            return
+        self._hint = choose_move(self.game)
+        self._draw_all()
+
     def _reset(self):
         self.game.__init__()
+        self._hint = None
         self._set_status("New game started.", "info")
         self._draw_all()
 
@@ -423,9 +477,14 @@ class GomokuUI:
             plt.close(self.fig)
         elif event.key == "r":
             self._reset()
+        elif event.key == "h" and self.hint_enabled:
+            self._show_hint()
 
     def _on_click(self, event):
-        if event.inaxes in (self.reset_ax, self.quit_ax):
+        button_axes = [self.reset_ax, self.quit_ax]
+        if self.hint_ax is not None:
+            button_axes.append(self.hint_ax)
+        if event.inaxes in button_axes:
             return
         if event.inaxes != self.board_ax:
             return
@@ -434,6 +493,10 @@ class GomokuUI:
                 "Game over — press R (or Restart) to play again.",
                 "error",
             )
+            self._draw_all()
+            return
+        if self._is_ai_turn():
+            self._set_status("Wait — it's the AI's turn.", "info")
             self._draw_all()
             return
         cell = self._click_to_cell(event)
@@ -453,6 +516,7 @@ class GomokuUI:
     def _try_play(self, r, c):
         ok, msg = self.game.play(r, c)
         if ok:
+            self._hint = None
             self._set_status("", "info")
         else:
             self._set_status(f"Illegal move: {msg}", "error")
@@ -461,3 +525,70 @@ class GomokuUI:
     def _set_status(self, msg, kind):
         self._status_msg = msg
         self._status_kind = kind
+
+
+# ---------- start-screen mode picker ----------
+
+
+def _pick_from_menu(title, options):
+    """Show a small window of stacked buttons and return the picked key.
+
+    `options` is a list of (key, label) pairs. Returns None if the user
+    closes the window without clicking any button.
+    """
+    fig = plt.figure(figsize=(6.5, 5.5), facecolor=BG)
+    try:
+        fig.canvas.manager.set_window_title("Gomoku")
+    except Exception:
+        pass
+
+    fig.text(0.5, 0.92, "GOMOKU", ha="center",
+             fontsize=26, fontweight="bold", color=TEXT_MAIN)
+    fig.text(0.5, 0.85, title, ha="center",
+             fontsize=13, color=TEXT_MUTE)
+
+    choice = {"key": None}
+    buttons = []
+    top, height, gap = 0.70, 0.12, 0.03
+
+    def make_callback(key):
+        def _clicked(_event):
+            choice["key"] = key
+            plt.close(fig)
+        return _clicked
+
+    for i, (key, label) in enumerate(options):
+        y = top - i * (height + gap)
+        ax = fig.add_axes([0.10, y - height, 0.80, height])
+        btn = Button(ax, label, color=CARD_BG, hovercolor="#EAD8B0")
+        btn.on_clicked(make_callback(key))
+        buttons.append(btn)
+
+    plt.show()
+    return choice["key"]
+
+
+def select_mode():
+    """Run the start-screen wizard.
+
+    Returns one of "pvp", "pvai-black", "pvai-white", "aivai", or None
+    if the user closes the window without finishing the choice.
+    """
+    top = _pick_from_menu(
+        "Choose a game mode",
+        [
+            ("pvp",   "Human   vs   Human"),
+            ("pvai",  "Human   vs   AI"),
+            ("aivai", "AI   vs   AI"),
+        ],
+    )
+    if top != "pvai":
+        return top
+
+    return _pick_from_menu(
+        "Which color do you want to play?",
+        [
+            ("pvai-black", "Black   (you play first)"),
+            ("pvai-white", "White"),
+        ],
+    )
