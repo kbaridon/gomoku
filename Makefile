@@ -9,7 +9,7 @@ all: venv upgrade_pip install
 	@echo "✅ Project ready."
 	@echo "-->   make run        (or) source .venv/bin/activate && python gomoku.py"
 
-run: all
+run:
 	@$(PYTHON) gomoku.py
 
 venv:
