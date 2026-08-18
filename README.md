@@ -1,12 +1,11 @@
 # Gomoku — 42 Project
 
-Two-player, same-machine Gomoku on a 19×19 goban with captures, endgame
-capture, and the double-three ban. Written in Python with a pure
-matplotlib UI.
+Gomoku on a 19×19 goban with captures, endgame capture, and the
+double-three ban. Written in Python with a pure matplotlib UI and a
+minimax / alpha-beta engine.
 
-This is the 42 `gomoku` project. The AI
-part is on the roadmap (see [TODO](#todo)); the rules engine and UI are
-complete.
+This is the 42 `gomoku` project. Rules engine, UI and AI are complete:
+play human vs human, human vs AI or AI vs AI.
 
 ## Getting started
 
@@ -58,7 +57,7 @@ All rules from the subject except the AI:
 
 ## Architecture
 
-Flat layout — five short modules, no package indirection.
+Flat layout for the game, one package for the engine.
 
 | File          | Role                                                    |
 | ------------- | ------------------------------------------------------- |
@@ -67,11 +66,118 @@ Flat layout — five short modules, no package indirection.
 | `rules.py`    | Move legality: free-threes, double-three ban.           |
 | `game.py`     | Turn order, capture counters, timers, win resolution.   |
 | `ui.py`       | matplotlib canvas, drawing, input handling.             |
+| `ai/`         | The engine — see [The AI](#the-ai).                     |
 
 Each module has one clear responsibility. `board.py` is pure state and
 geometry — no notion of turns. `rules.py` reads the board and answers
 "is this move legal?". `game.py` is the only thing that mutates state
-per turn. `ui.py` is the only thing that touches matplotlib.
+per turn. `ui.py` is the only thing that touches matplotlib. `ai/` only
+reads a `Game` and answers with a move — it never mutates it.
+
+## The AI
+
+`ai.choose_move(game)` returns the move to play. The same call serves the
+AI players and the human hint.
+
+| Module               | Role                                                    |
+| -------------------- | ------------------------------------------------------- |
+| `ai/engine.py`       | Minimax (negamax) + alpha-beta + iterative deepening.   |
+| `ai/search_space.py` | Rectangular windows and candidate move ranking.         |
+| `ai/state.py`        | Undoable copy of a game, used as a search node.         |
+| `ai/evaluation.py`   | Incremental, line-by-line board scoring.                |
+| `ai/patterns.py`     | What a shape is worth.                                  |
+| `ai/lines.py`        | Pre-computed line geometry of the goban.                |
+| `ai/reporting.py`    | Terminal trace of the depths reached.                   |
+| `ai/config.py`       | Every tunable constant.                                 |
+
+### Search space — multiple rectangular windows
+
+Looking at all 361 intersections is hopeless, and the usual single
+bounding box around every stone wastes most of its area as soon as the
+game spreads to two corners. So the space is a *set* of rectangles:
+
+1. stones within Chebyshev distance `CLUSTER_RADIUS` of each other are
+   grouped into clusters;
+2. each cluster gives one rectangle — its bounding box;
+3. two rectangles are merged only while their union wastes less than
+   `MAX_WASTE_RATIO` of its own area, so a local fight keeps its own
+   small window instead of being swallowed by a distant one;
+4. each surviving window is grown by `WINDOW_MARGIN`, the border where
+   the next stone is likely to land.
+
+Four stones in two opposite corners give two windows of about 30 cells
+instead of one box of 361. The windows are computed once per turn: the
+few stones the search adds always fall inside them or in their margin.
+
+### Algorithm — alpha-beta minimax
+
+Negamax form: a single routine handles both sides by negating the value
+returned by the deeper call. On top of the plain algorithm:
+
+- **Alpha-beta pruning** — branches that cannot change the result are
+  cut. The payoff depends entirely on move ordering, hence the next
+  point.
+- **Two-stage move ordering.** A cheap proximity pass keeps the
+  `SHORTLIST_SIZE` most crowded cells of the windows; those are then
+  really played and scored, and the best `BRANCHING` of them are
+  searched. At the last ply that score *is* the leaf value, so ordering
+  and evaluation are the same pass.
+- **Iterative deepening.** Depth 1, then 2, then 3... keeping the best
+  move of the last *completed* depth. The search stops once
+  `TIME_BUDGET` is spent, so the move played is always the product of a
+  full search. The previous depth's best move is tried first at the next
+  depth.
+- **Incremental evaluation.** A full board scan per node is far too
+  expensive, so the evaluator keeps one score per line and refreshes
+  only the four lines a changed cell belongs to. Playing and taking back
+  a move costs a handful of line re-scores, and identical lines are
+  memoised.
+- **Early exit** on a proven win or loss: a deeper search cannot say
+  anything new.
+
+### Time control
+
+`TIME_BUDGET` in `ai/config.py` is the wall clock a move may spend
+thinking, a margin kept aside for the bookkeeping that follows the
+search. It is set to **0.85s**, for a move capped at 0.9s. Note that the
+42 subject asks for 0.5s per move: `TIME_BUDGET = 0.45` restores that,
+at the cost of roughly one ply of depth.
+
+In practice the engine reaches depth 4 in the middlegame, and much
+deeper when the position is forcing.
+
+### Watching it think
+
+The board is a matplotlib window, so the search reports to the terminal
+instead. Every move prints the depths as they complete, and the end of
+the session prints the deepest search reached:
+
+```
+Black searching: 1 2 3 4   -> (8, 9) in 0.85s (depth 4)
+White searching: 1 2 3 4 5   -> (7, 10) in 0.61s (depth 5)
+
+Engine: 26 moves searched, deepest search reached depth 5.
+```
+
+A move that ends early -- an opening move, or a forced win found at
+depth 3 -- simply lists fewer depths.
+
+### Evaluation
+
+A line is scored from one player's point of view as a string (`X` own,
+`O` opponent, `.` empty, `#` edge of the board). Offensive shapes are
+matched from the strongest down — five, open four, four, free three,
+and so on — and the stones of a matched shape are masked out so that the
+same stones are never counted twice. Capture weaknesses (`OXX.`) are
+matched separately, without masking, because a pair can be both part of
+a strong three and one move away from being captured. Captured stones
+are worth a growing bonus, ten of them being a win.
+
+The search plays by the real rules: captures, win by capture and the
+"align five, then survive the opponent's answer" endgame are all
+reproduced in `ai/state.py`. An alignment the opponent cannot break is
+scored as an immediate win; a breakable one only wins if the opponent
+fails to break it.
 
 ## Design choices
 
@@ -101,23 +207,23 @@ Notable calls where reasonable people would disagree:
 
 ## TODO
 
-What the 42 subject still asks for. Ordered by priority.
+### Done
 
-### Mandatory
+- [x] **AI opponent** — minimax with alpha-beta pruning.
+- [x] **Move time cap** — iterative deepening keeps the best move of the
+      last completed depth. `TIME_BUDGET`, in `ai/config.py`.
+- [x] **Move suggestion / hint mode** — same engine, one call.
+- [x] **Human vs AI and AI vs AI modes**, colour choice at game start.
+- [x] **Performance display** — think time per move, per player.
 
-- [ ] **AI opponent (min-max with alpha-beta pruning).**
-      Plug into `Game.play(r, c)` from a controller loop — the rest of
-      the code doesn't need to change. Needs a heuristic that
-      recognizes free-threes, four-threats, captures, and the pending
-      alignment state.
-- [ ] **0.5s move time cap for the AI.** Iterative deepening so the
-      search returns the best move found so far when time runs out.
-- [ ] **Move suggestion / hint mode.** Reuse the AI to highlight a
-      recommended move for the human player.
-- [ ] **Human vs AI and AI vs AI modes** in the UI — colour choice at
-      game start.
-- [ ] **Performance display** — show the AI's think time per move
-      (already have the plumbing for human timing; extend it).
+### Possible improvements
+
+- [ ] **Transposition table** — the same position is reached through
+      several move orders and is searched again every time.
+- [ ] **Threat-space search** — following forcing moves past the nominal
+      depth would find longer forced wins.
+- [ ] **Tuning the pattern table** by self-play; the current values are
+      hand-picked, not fitted.
 
 
 ## Sanity checks

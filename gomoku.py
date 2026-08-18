@@ -1,5 +1,6 @@
 import argparse
 
+from ai import print_search_summary
 from board import BLACK, WHITE
 from game import Game
 from ui import GomokuUI, select_mode
@@ -33,6 +34,7 @@ def main():
     game = Game()
     ui = GomokuUI(game, players=MODES[mode])
     ui.run()
+    print_search_summary()
 
 
 if __name__ == "__main__":
