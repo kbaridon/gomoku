@@ -1,9 +1,16 @@
 import time
 
 from board import BLACK, WHITE, EMPTY, STONE_NAME, Board, opponent
-from rules import is_legal
+from rules import alignment_is_breakable, is_legal
 
 CAPTURE_WIN_THRESHOLD = 10
+
+# Stones one move is assumed able to capture. A move can flank a pair in
+# several directions at once, and three is already exotic; the number is only
+# used to decide whether an opponent still has a chance to win by capture on
+# the turn they would otherwise be given, so erring high only costs a turn
+# that changes nothing.
+MOST_CAPTURED_IN_A_MOVE = 6
 
 
 class Game:
@@ -11,10 +18,11 @@ class Game:
 
     Win conditions handled:
     - A player captures 10 opponent stones -> immediate win by capture.
-    - A player aligns 5+ stones -> "pending" win that only resolves after
-      the opponent's next move. If the opponent can break every alignment
-      with a capture (or win by capture themselves), the pending win is
-      cancelled; otherwise the aligning player wins.
+    - A player aligns 5+ stones. The opponent is owed one turn to break it,
+      but only when breaking it is actually possible: an alignment no capture
+      can reach, against an opponent too far from a capture win to end the
+      game on that turn, decides the game there and then. Otherwise the win
+      is "pending" and resolves after the opponent has moved.
     """
 
     def __init__(self):
@@ -82,7 +90,8 @@ class Game:
         if self._resolve_pending_alignment(mover):
             return True, ""
 
-        self._register_new_alignments(mover)
+        if self._register_new_alignments(mover):
+            return True, ""
         self._switch()
         return True, ""
 
@@ -123,10 +132,32 @@ class Game:
         )
 
     def _register_new_alignments(self, mover):
+        """Record a new five, or win outright if nothing can answer it.
+
+        Returns True when the game is over. Handing the opponent a turn they
+        cannot use is a turn spent proving what is already true, so it is only
+        given when they can actually break the line -- or when they are close
+        enough to ten captured stones to end the game on it instead, which the
+        rules resolve before the alignment.
+        """
         alignments = self.board.find_all_alignments(mover)
-        if alignments:
-            self.pending_alignment_owner = mover
-            self.pending_alignment = alignments
+        if not alignments:
+            return False
+        unbreakable = any(
+            not alignment_is_breakable(self.board, alignment, mover)
+            for alignment in alignments
+        )
+        if unbreakable and not self._opponent_may_win_by_capture(mover):
+            self._declare_winner(mover, "alignment")
+            return True
+        self.pending_alignment_owner = mover
+        self.pending_alignment = alignments
+        return False
+
+    def _opponent_may_win_by_capture(self, mover):
+        """Could the opponent still reach ten captured stones in one move?"""
+        return (self.captures[opponent(mover)]
+                >= CAPTURE_WIN_THRESHOLD - MOST_CAPTURED_IN_A_MOVE)
 
     def _declare_winner(self, winner, reason):
         self.winner = winner

@@ -23,6 +23,9 @@ from board import BLACK, EMPTY, WHITE
 
 WIN_SCORE = 10_000_000
 
+# Stones in a row that win the game.
+ALIGNMENT_LENGTH = 5
+
 # Character used to blank out stones already accounted for.
 MASK = "_"
 
@@ -96,6 +99,46 @@ def _score_threats(line):
             total += value
             start = at + 1
     return total
+
+
+@lru_cache(maxsize=200_000)
+def five_gaps(line):
+    """Where each colour would align five on `line`; returns (black, white).
+
+    Each is a tuple of *cell* indexes -- the edge marker in front of the text
+    is already discounted, so they index the line's cells directly.
+
+    This is the one shape the move generator may never miss, and the reason
+    it needs its own answer rather than the pattern score's. Candidates are
+    ranked by how crowded their surroundings are, and the cell that completes
+    a five is one of the loneliest on the board: it sits at the end of a row
+    with a single stone beside it, while the cells in the middle of any crowd
+    have six or eight. It was measured to fall past the promotion window and
+    out of the shortlist -- so a forced win three plies down was invisible,
+    and every score along that line was wrong. See `search_space.shortlist`.
+
+    Read off the line text, so no stone is placed and nothing is evaluated;
+    cached like the pattern score, on the same keys.
+    """
+    found = []
+    for stone in ("B", "W"):
+        gaps = []
+        for at in range(1, len(line) - 1):
+            if line[at] != ".":
+                continue
+            run = 1
+            before = at - 1
+            while line[before] == stone:      # the edge marker stops this
+                run += 1
+                before -= 1
+            after = at + 1
+            while line[after] == stone:
+                run += 1
+                after += 1
+            if run >= ALIGNMENT_LENGTH:
+                gaps.append(at - 1)
+        found.append(tuple(gaps))
+    return tuple(found)
 
 
 @lru_cache(maxsize=200_000)

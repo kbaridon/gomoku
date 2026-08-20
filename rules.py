@@ -1,4 +1,4 @@
-from board import DIRECTIONS, EMPTY
+from board import ALL_DIRECTIONS, DIRECTIONS, EMPTY, opponent
 
 FREE_THREE_PATTERNS = (
     ".XXX.",
@@ -73,3 +73,35 @@ def is_legal(board, r, c, color):
     if not captures and count_free_threes(board, r, c, color) >= 2:
         return False, "Forbidden double-three"
     return True, ""
+
+
+def is_capturable(board, r, c, color):
+    """Can the `color` stone at (r, c) be taken by a single opponent move?
+
+    A capture needs the pattern opponent - stone - mate - empty along one
+    direction: playing the empty cell flanks the pair. A capturing move is
+    never rejected by the double-three rule, so an empty cell in range is
+    enough to make it legal and no legality check is needed here.
+    """
+    opp = opponent(color)
+    for dr, dc in ALL_DIRECTIONS:
+        mate = (r + dr, c + dc)
+        behind = (r - dr, c - dc)
+        front = (r + 2 * dr, c + 2 * dc)
+        if not (board.in_bounds(*mate) and board.in_bounds(*behind)
+                and board.in_bounds(*front)):
+            continue
+        if board.get(*mate) != color:
+            continue
+        if board.get(*behind) == opp and board.get(*front) == EMPTY:
+            return True
+    return False
+
+
+def alignment_is_breakable(board, alignment, color):
+    """Can the opponent take a stone out of `alignment` in one move?
+
+    Breaking it is the opponent's only answer to five in a row, so an
+    alignment no capture reaches has already decided the game.
+    """
+    return any(is_capturable(board, r, c, color) for r, c in alignment)

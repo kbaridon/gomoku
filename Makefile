@@ -23,13 +23,17 @@ PIP = $(PYTHON) -m pip
 REMOVE = $(SYSTEM_PYTHON) -c "import shutil, sys; [shutil.rmtree(p, ignore_errors=True) for p in sys.argv[1:]]"
 REMOVE_PYCACHE = $(SYSTEM_PYTHON) -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__') if '$(VENV)' not in p.parts]"
 
-.PHONY: all venv upgrade_pip install run test clean fclean re
+# Delete plain files, without rm -f.
+REMOVE_FILES = $(SYSTEM_PYTHON) -c "import pathlib, sys; [pathlib.Path(p).unlink(missing_ok=True) for p in sys.argv[1:]]"
+
+.PHONY: all venv upgrade_pip install run test viz clean fclean re
 
 # Messages stay free of quotes and of shell metacharacters such as > or ( ),
 # so that they read the same through sh and through make's own echo.
 all: install
 	@echo Project ready.
 	@echo Start the game with: make run
+	@echo See how the engine thinks: make viz
 	@echo Or directly: $(PYTHON) gomoku.py
 
 # The interpreter itself is the proof that the venv exists: make only builds
@@ -50,6 +54,12 @@ run: $(PYTHON)
 
 test: $(PYTHON)
 	@$(PYTHON) -m pytest
+
+# Opens the studio: build a position, take it apart five ways. ARGS passes
+# through, so `make viz ARGS=--explore` and `ARGS=--panels` reach the other
+# two views.
+viz: $(PYTHON)
+	@$(PYTHON) -m viz $(ARGS)
 
 clean:
 	@$(REMOVE_PYCACHE)

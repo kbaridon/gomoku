@@ -47,3 +47,35 @@ def _build(size):
 
 
 LINES, CELL_LINES = _build(BOARD_SIZE)
+
+
+# ---------- neighbourhood ----------
+
+# Weights of the cells around a stone, by Chebyshev ray distance. A stone one
+# step away makes a cell far more interesting than one two steps away.
+PROXIMITY_WEIGHTS = ((1, 4), (2, 1))
+
+
+def _build_neighbourhood(size):
+    """cell -> the (row, col, weight) it radiates onto, bounds already checked.
+
+    `SearchState` keeps a proximity count per cell and refreshes it whenever a
+    stone appears or disappears. Pre-resolving the geometry here means that
+    refresh is a flat loop over a tuple, with no arithmetic and no bounds test.
+    """
+    rays = [(dr, dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+            if (dr, dc) != (0, 0)]
+    table = {}
+    for r in range(size):
+        for c in range(size):
+            around = []
+            for dr, dc in rays:
+                for distance, weight in PROXIMITY_WEIGHTS:
+                    rr, cc = r + dr * distance, c + dc * distance
+                    if 0 <= rr < size and 0 <= cc < size:
+                        around.append((rr, cc, weight))
+            table[(r, c)] = tuple(around)
+    return table
+
+
+NEIGHBOURHOOD = _build_neighbourhood(BOARD_SIZE)

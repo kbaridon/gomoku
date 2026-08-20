@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyBboxPatch, Rectangle
 from matplotlib.widgets import Button
 
-from ai import choose_move
+from ai import choose_move, reset_tables
 from board import BLACK, BOARD_SIZE, EMPTY, STONE_NAME, WHITE
 
 
@@ -468,6 +468,9 @@ class GomokuUI:
 
     def _reset(self):
         self.game.__init__()
+        # The engine remembers positions across moves; none of what it knows
+        # belongs to the new game.
+        reset_tables()
         self._hint = None
         self._set_status("New game started.", "info")
         self._draw_all()

@@ -21,6 +21,33 @@ def opponent(color):
     return BLACK
 
 
+_CAPTURE_RAYS = {}
+
+
+def _capture_rays(size):
+    """cell -> the (r1, c1, r2, c2, r3, c3) triples a capture could use.
+
+    Only the directions where all three cells stay on the board are kept, so
+    the caller never has to test bounds. Built once per board size.
+    """
+    rays = _CAPTURE_RAYS.get(size)
+    if rays is not None:
+        return rays
+    rays = {}
+    for r in range(size):
+        for c in range(size):
+            here = []
+            for dr, dc in ALL_DIRECTIONS:
+                cells = [(r + i * dr, c + i * dc) for i in (1, 2, 3)]
+                if all(0 <= pr < size and 0 <= pc < size for pr, pc in cells):
+                    here.append((cells[0][0], cells[0][1],
+                                 cells[1][0], cells[1][1],
+                                 cells[2][0], cells[2][1]))
+            rays[(r, c)] = tuple(here)
+    _CAPTURE_RAYS[size] = rays
+    return rays
+
+
 class Board:
     def __init__(self, size=BOARD_SIZE):
         self.size = size
@@ -44,19 +71,20 @@ class Board:
         A capture flanks exactly two adjacent opponent stones on a line —
         pattern is (color, opp, opp, color) starting from the placed stone.
         Single stones and triples are never captured.
+
+        The AI calls this once per candidate move at every node it searches,
+        so the geometry — which three cells to read in each direction, and
+        which directions stay on the board at all — is resolved once in
+        `_capture_rays` and only the three reads are left here.
         """
         opp = opponent(color)
+        grid = self.grid
         captured = []
-        for dr, dc in ALL_DIRECTIONS:
-            positions = [(r + i * dr, c + i * dc) for i in (1, 2, 3)]
-            if not all(self.in_bounds(pr, pc) for pr, pc in positions):
-                continue
-            v1 = self.get(*positions[0])
-            v2 = self.get(*positions[1])
-            v3 = self.get(*positions[2])
-            if v1 == opp and v2 == opp and v3 == color:
-                captured.append(positions[0])
-                captured.append(positions[1])
+        for r1, c1, r2, c2, r3, c3 in _capture_rays(self.size)[(r, c)]:
+            if (grid[r1][c1] == opp and grid[r2][c2] == opp
+                    and grid[r3][c3] == color):
+                captured.append((r1, c1))
+                captured.append((r2, c2))
         return captured
 
     def _count_run(self, r, c, dr, dc, color):

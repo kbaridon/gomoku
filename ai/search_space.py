@@ -1,4 +1,4 @@
-"""Where the engine is allowed to look.
+"""Where the engine is allowed to look, and in which order.
 
 Considering the 361 intersections of an empty goban is hopeless, and the
 usual trick -- one bounding box around every stone -- wastes a huge amount
@@ -13,15 +13,25 @@ So the space is described by *several* rectangular windows instead:
 4. every window is then grown by a margin, the border where the next stone
    is likely to be played.
 
-The candidate moves are the empty cells of those windows, ranked so that
-alpha-beta sees the promising ones first.
+That geometry only depends on the stones already on the board, so it is built
+once per move and handed down the tree as a `SearchSpace`, whose flattened
+cell set is what every node actually intersects against.
+
+The candidate moves are the empty cells of that space which have a stone in
+reach, ranked so that alpha-beta sees the promising ones first. Ranking is
+what makes the pruning work, and it is also the single most expensive thing
+the search does, so it happens in two stages: a free one first -- the
+proximity counts `SearchState` already maintains -- then the real one, which
+plays each surviving candidate and reads the incremental evaluation back.
 """
 
-from board import ALL_DIRECTIONS, EMPTY
-from rules import is_legal
+from board import BLACK, DIRECTIONS, EMPTY, WHITE, opponent
+from game import CAPTURE_WIN_THRESHOLD, MOST_CAPTURED_IN_A_MOVE
 
-from .config import (BRANCHING, CLUSTER_RADIUS, MAX_WASTE_RATIO,
-                     SHORTLIST_SIZE, WINDOW_MARGIN)
+from .config import (CLUSTER_RADIUS, CRITICAL_RUN, MAX_WASTE_RATIO,
+                     SHORTLIST_MARGIN, TACTICAL_TAIL, WINDOW_MARGIN)
+from .shapes import is_playable, longest_run
+from .state import ALIGNMENT_LENGTH
 
 
 class Window:
@@ -137,73 +147,244 @@ def window_cells(windows):
     return cells
 
 
+class SearchSpace:
+    """The windows of one move, flattened once for the whole tree.
+
+    Every node has to answer "is this cell in bounds of the search?", and it
+    answers it by intersecting the state's set of cells-with-a-stone-in-reach
+    with `cells`. Both are sets, so the whole question is one C-level
+    operation, and neither of them is rebuilt on the way down.
+    """
+
+    __slots__ = ("windows", "cells")
+
+    def __init__(self, windows):
+        self.windows = list(windows)
+        self.cells = frozenset(window_cells(self.windows))
+
+    def __repr__(self):
+        return f"SearchSpace({self.windows!r})"
+
+
+def search_space(board, **kwargs):
+    """The `SearchSpace` a search from `board` is confined to."""
+    return SearchSpace(search_windows(board, **kwargs))
+
+
 # ---------- candidate moves ----------
 
-# A neighbour one step away matters much more than one two steps away.
-_PROXIMITY_WEIGHTS = ((1, 4), (2, 1))
 
+def _capture_wins(state, cells):
+    """Cells among `cells` where a capture would end the game there and then.
 
-def _proximity(board, r, c):
-    """How crowded the surroundings of an empty cell are."""
-    score = 0
-    for dr, dc in ALL_DIRECTIONS:
-        for distance, weight in _PROXIMITY_WEIGHTS:
-            rr, cc = r + dr * distance, c + dc * distance
-            if board.in_bounds(rr, cc) and board.get(rr, cc) != EMPTY:
-                score += weight
-    return score
+    The other way to win. `Evaluator.decisive_cells` knows where a five could
+    be completed because a five is a property of a line; a capture is not, so
+    it needs asking separately -- and it was missed for exactly as long as the
+    five was, and in exactly the same way. The cell that completes a capture
+    sits at the end of a pair with one stone beside it, which puts it near the
+    bottom of a ranking that counts neighbours and below the run threshold
+    that rescues four-makers. With the opponent at eight captured stones the
+    engine would answer somewhere else entirely and lose on the spot.
 
-
-def shortlist(state, windows, size=SHORTLIST_SIZE):
-    """Legal moves of the windows, roughly ranked, cut down to `size`.
-
-    This first pass is deliberately cheap: it only looks at how close a cell
-    is to existing stones. The expensive ranking happens afterwards, on the
-    few cells that survive here.
+    Only asked when somebody is close enough for one move to finish it, which
+    is rare, because it costs a capture scan per cell for each side in range.
     """
+    close = [color for color in (BLACK, WHITE)
+             if state.captures[color] >= CAPTURE_WIN_THRESHOLD - MOST_CAPTURED_IN_A_MOVE]
+    if not close:
+        return frozenset()
+
     board = state.board
-    scored = []
-    for r, c in window_cells(windows):
-        if board.get(r, c) != EMPTY:
-            continue
-        proximity = _proximity(board, r, c)
-        if proximity == 0:
-            continue
-        scored.append((proximity, (r, c)))
-
-    scored.sort(key=lambda item: -item[0])
-
-    moves = []
-    for _, (r, c) in scored:
-        if not is_legal(board, r, c, state.current)[0]:
-            continue
-        moves.append((r, c))
-        if len(moves) >= size:
-            break
-    return moves
+    found = set()
+    for _, r, c in cells:
+        for color in close:
+            taken = board.find_captures(r, c, color)
+            if (taken and state.captures[color] + len(taken)
+                    >= CAPTURE_WIN_THRESHOLD):
+                found.add((r, c))
+                break
+    return found
 
 
-def ranked_moves(state, windows, limit=BRANCHING):
-    """The best `limit` moves, strongest first, with their static value.
+def shortlist(state, space, size):
+    """The `size` most promising empty cells of `space`.
 
-    Each candidate is played and taken back -- which is cheap thanks to the
-    incremental evaluator -- so the returned score is the real value of the
-    resulting position, and immediate wins are detected on the way.
+    Promise is measured by the proximity counts `SearchState` already keeps up
+    to date, so the common case touches the board not at all. But proximity
+    counts neighbours in every direction alike, which rewards a blob of stones
+    and says nothing about a line -- and the move that completes or blocks a
+    five is often a lonely cell at the end of a row, ranked below a dozen
+    cells in the middle of a crowd.
 
-    Returns a list of ``(score, wins, (row, col))`` sorted by decreasing
-    score, from the point of view of the player to move.
+    So before anything is thrown away, the cells about to be cut are checked
+    for that one thing, and a cell that would make a line of `CRITICAL_RUN`
+    for either colour goes to the front instead of over the edge.
+
+    Only the cut-off tail is examined, and only `TACTICAL_TAIL` of it: a
+    narrow node keeps four candidates out of fifty, and walking the other
+    forty-six at every node costs more than the whole search saves.
+
+    That window is a compromise, and it is not good enough for the one move
+    that must never be missed. A cell completing a *five* was measured
+    twentieth by proximity in an ordinary middlegame -- one place past the
+    window -- so
+    the search played on unaware that the game was already over three plies
+    down, and every value along that line was wrong. Those cells come from
+    `Evaluator.decisive_cells`, which knows where they are without ranking
+    anything, and they are taken from wherever they sit in the tail. They
+    cost nothing to ask for: nearly every position has no four on it at all.
+    """
+    proximity = state.proximity
+    grid = state.board.grid
+    scored = [
+        (proximity[r][c], r, c)
+        for r, c in state.nearby.intersection(space.cells)
+        if grid[r][c] == EMPTY
+    ]
+    scored.sort(reverse=True)
+    if len(scored) <= size:
+        return scored
+
+    evaluator = state.evaluator
+    tail = scored[size:]
+    urgent = [entry for entry in tail[:TACTICAL_TAIL]
+              if longest_run(evaluator, entry[1], entry[2]) >= CRITICAL_RUN]
+    decisive = evaluator.decisive_cells() | _capture_wins(state, tail)
+    if decisive:
+        seen = {(r, c) for _, r, c in urgent}
+        urgent = [entry for entry in tail
+                  if (entry[1], entry[2]) in decisive
+                  and (entry[1], entry[2]) not in seen] + urgent
+    if not urgent:
+        del scored[size:]
+        return scored
+    return urgent[:size] + scored[:max(0, size - len(urgent))]
+
+
+def _completes_five(grid, size, r, c, color):
+    """Would `color` reach five in a row by playing (r, c)?
+
+    A cheap board read, no stone placed and nothing evaluated: it is the gate
+    that decides whether the real, expensive threat test is worth running.
+    """
+    for dr, dc in DIRECTIONS:
+        total = 1
+        for step in (1, -1):
+            rr, cc = r + step * dr, c + step * dc
+            while 0 <= rr < size and 0 <= cc < size and grid[rr][cc] == color:
+                total += 1
+                rr += step * dr
+                cc += step * dc
+        if total >= ALIGNMENT_LENGTH:
+            return True
+    return False
+
+
+def forced_replies(state, cells):
+    """The cells the opponent would win outright on, if there are any.
+
+    When the opponent has a move that ends the game, the position is not a
+    choice between a dozen plans any more: it is answer the threat or lose.
+    Recognising that collapses the branching of exactly the deep, sharp lines
+    that otherwise cost the most to search.
+
+    "Would win outright" is meant strictly. A five the opponent can complete
+    is not a win here if a capture can still break it -- the rules grant one
+    turn to do so -- so each suspect is really played and the endgame really
+    resolved before it counts. The cheap `_completes_five` gate means that
+    only happens in the rare node where a five is one move away.
+    """
+    opp = opponent(state.current)
+    grid = state.board.grid
+    size = state.board.size
+    suspects = [(r, c) for _, r, c in cells
+                if _completes_five(grid, size, r, c, opp)]
+    if not suspects:
+        return ()
+
+    ours = state.current
+    state.current = opp
+    try:
+        winning = []
+        for r, c in suspects:
+            move = state.play(r, c)
+            if state.winner == opp:
+                winning.append((r, c))
+            state.undo(move)
+    finally:
+        state.current = ours
+    return frozenset(winning)
+
+
+def _shortlist_size(limit):
+    """How many candidates to pre-rank for a node keeping `limit` of them.
+
+    Wide nodes get the full margin, which they were measured to need. Narrow
+    ones do not: past twice the beam, every extra candidate is a full
+    play/evaluate/undo whose result is thrown away.
+    """
+    return min(limit + SHORTLIST_MARGIN, 2 * limit)
+
+
+def try_move(state, r, c):
+    """Play (r, c), read the position off, take it back.
+
+    Returns ``(score, wins, loses, captured)`` from the point of view of the
+    player who moved, or None if the move is forbidden. This is the expensive
+    half of move ordering; thanks to the incremental evaluator, "expensive"
+    means a handful of line re-scores rather than a board scan.
     """
     color = state.current
-    evaluated = []
-    for r, c in shortlist(state, windows):
-        move = state.play(r, c)
-        wins = state.winner == color
-        loses = state.winner is not None and not wins
-        score = state.evaluate(color)
-        state.undo(move)
-        evaluated.append((score, wins, loses, (r, c)))
+    captured = state.board.find_captures(r, c, color)
+    if not is_playable(state, r, c, captured):
+        return None
+    move = state.play(r, c, captured)
+    wins = state.winner == color
+    loses = state.winner is not None and not wins
+    score = state.evaluate(color)
+    state.undo(move)
+    return score, wins, loses, captured
 
-    evaluated.sort(key=lambda item: (item[1], not item[2], item[0]),
-                   reverse=True)
-    return [(score, wins, loses, move)
-            for score, wins, loses, move in evaluated[:limit]]
+
+def ranked_moves(state, space, limit, skip=()):
+    """The best `limit` moves, strongest first, with their static value.
+
+    Returns a list of ``(score, wins, loses, (row, col), captured)`` sorted by
+    decreasing value for the player to move. `skip` holds the cells the caller
+    already searched -- the transposition table's move and the killers, which
+    the engine tries before paying for any of this.
+
+    A move that wins outright ends the generation on the spot: nothing the
+    other candidates could be worth would beat it, so scoring them is waste.
+    And when the opponent is the one threatening to win, everything that does
+    not answer the threat is dropped -- see `forced_replies`.
+    """
+    cells = shortlist(state, space, _shortlist_size(limit))
+    forced = forced_replies(state, cells)
+
+    evaluated = []
+    for _, r, c in cells:
+        if (r, c) in skip:
+            continue
+        outcome = try_move(state, r, c)
+        if outcome is None:
+            continue
+        score, wins, loses, captured = outcome
+        if wins:
+            return [(score, True, False, (r, c), captured)]
+        evaluated.append((score, False, loses, (r, c), captured))
+
+    if forced:
+        # Take the threatened cell, or capture a stone so that the five can
+        # be broken next turn. Nothing else survives the opponent's reply --
+        # unless nothing at all does, and then the ranking stands as it is so
+        # the search still returns the least bad line.
+        answers = [entry for entry in evaluated
+                   if entry[3] in forced or entry[4]]
+        if answers:
+            evaluated = answers
+
+    # Losing moves last, then by decreasing static value.
+    evaluated.sort(key=lambda item: (not item[2], item[0]), reverse=True)
+    del evaluated[limit:]
+    return evaluated

@@ -12,6 +12,7 @@ play human vs human, human vs AI or AI vs AI.
 ```bash
 make        # create .venv + install deps
 make run    # launch the game
+make viz    # the studio: one position, five ways of taking it apart
 
 # or manually:
 source .venv/bin/activate && python gomoku.py
@@ -32,10 +33,11 @@ All rules from the subject except the AI:
   placed stone. Self-capture is impossible: placing between two
   opponent stones does not remove your own stone.
 - **Win by capture** at 10 captured opponent stones.
-- **Endgame capture**: aligning five does not win immediately. It
-  becomes a *pending* win — the opponent has one turn to break every
-  alignment via capture, or win by capture themselves. Otherwise the
-  aligning player wins on the opponent's turn.
+- **Endgame capture**: aligning five wins immediately *only when nothing
+  can answer it*. If a capture could take a stone out of the row, or the
+  opponent is within one move of ten captured stones, the win is
+  *pending* instead and they get their turn to try. A turn that cannot
+  change the result is not offered — the game just ends.
 - **Double-three forbidden**: any move creating ≥ 2 free-threes is
   rejected, *unless* the same move captures at least one pair (subject
   appendix).
@@ -63,10 +65,11 @@ Flat layout for the game, one package for the engine.
 | ------------- | ------------------------------------------------------- |
 | `gomoku.py`   | Entry point. Wires a `Game` to a `GomokuUI`.            |
 | `board.py`    | `Board` grid + capture detection + alignment scanning.  |
-| `rules.py`    | Move legality: free-threes, double-three ban.           |
+| `rules.py`    | Move legality, and whether a stone can be captured.     |
 | `game.py`     | Turn order, capture counters, timers, win resolution.   |
 | `ui.py`       | matplotlib canvas, drawing, input handling.             |
 | `ai/`         | The engine — see [The AI](#the-ai).                     |
+| `viz/`        | `make viz` — the studio: how a move gets chosen.        |
 
 Each module has one clear responsibility. `board.py` is pure state and
 geometry — no notion of turns. `rules.py` reads the board and answers
@@ -79,16 +82,19 @@ reads a `Game` and answers with a move — it never mutates it.
 `ai.choose_move(game)` returns the move to play. The same call serves the
 AI players and the human hint.
 
-| Module               | Role                                                    |
-| -------------------- | ------------------------------------------------------- |
-| `ai/engine.py`       | Minimax (negamax) + alpha-beta + iterative deepening.   |
-| `ai/search_space.py` | Rectangular windows and candidate move ranking.         |
-| `ai/state.py`        | Undoable copy of a game, used as a search node.         |
-| `ai/evaluation.py`   | Incremental, line-by-line board scoring.                |
-| `ai/patterns.py`     | What a shape is worth.                                  |
-| `ai/lines.py`        | Pre-computed line geometry of the goban.                |
-| `ai/reporting.py`    | Terminal trace of the depths reached.                   |
-| `ai/config.py`       | Every tunable constant.                                 |
+| Module                | Role                                                   |
+| --------------------- | ------------------------------------------------------ |
+| `ai/engine.py`        | Negamax + alpha-beta + iterative deepening + the beam. |
+| `ai/search_space.py`  | Rectangular windows and candidate move ranking.        |
+| `ai/state.py`         | Undoable copy of a game, used as a search node.        |
+| `ai/evaluation.py`    | Incremental, line-by-line board scoring.               |
+| `ai/shapes.py`        | Double-three ban and five-in-a-row, read off the lines.|
+| `ai/patterns.py`      | What a shape is worth.                                 |
+| `ai/lines.py`         | Pre-computed line and neighbourhood geometry.          |
+| `ai/transposition.py` | What the search already knows about a position.        |
+| `ai/zobrist.py`       | The keys that table is indexed by.                     |
+| `ai/reporting.py`     | Terminal trace of the depths reached.                  |
+| `ai/config.py`        | Every tunable constant.                                |
 
 ### Search space — multiple rectangular windows
 
@@ -117,16 +123,48 @@ returned by the deeper call. On top of the plain algorithm:
 - **Alpha-beta pruning** — branches that cannot change the result are
   cut. The payoff depends entirely on move ordering, hence the next
   point.
-- **Two-stage move ordering.** A cheap proximity pass keeps the
-  `SHORTLIST_SIZE` most crowded cells of the windows; those are then
-  really played and scored, and the best `BRANCHING` of them are
-  searched. At the last ply that score *is* the leaf value, so ordering
-  and evaluation are the same pass.
-- **Iterative deepening.** Depth 1, then 2, then 3... keeping the best
-  move of the last *completed* depth. The search stops once
-  `TIME_BUDGET` is spent, so the move played is always the product of a
-  full search. The previous depth's best move is tried first at the next
-  depth.
+- **Two-stage move ordering.** A cheap proximity pass shortlists the
+  most crowded cells of the windows; those are then really played and
+  scored, and the best of them are searched. At the last ply that score
+  *is* the leaf value, so ordering and evaluation are the same pass.
+  Proximity counts neighbours, not lines, so before anything is cut, the
+  cells about to go are checked for one thing: would a stone there make a
+  line of `CRITICAL_RUN` for *either* colour? Those go to the front.
+  Without it the engine is blind in a specific and fatal way — the move
+  that turns a three into an open four has one neighbour, while the cells
+  alongside the three have three each, so neither side generated the
+  winning extension and games ran to a quick alignment. That check looks
+  only `TACTICAL_TAIL` places past the cut, which is a compromise and not
+  good enough for the one move that must never be missed: the cells that
+  complete a *five* come from `Evaluator.decisive_cells`, which knows
+  where they are without ranking anything and rescues them from anywhere.
+  A capture that reaches ten stones is rescued the same way, and had the
+  same bug: the cell completing it has one neighbour and makes a run of
+  three, so with the opponent at eight captured stones the engine would
+  answer at the far end of the board and lose on the spot.
+- **An asymmetric evaluation.** The opponent's shapes weigh
+  `DEFENCE_WEIGHT` times one's own. A symmetric score makes building a
+  three and blocking a three come out even; they are not even, because
+  whoever ignores the other's three loses the tempo.
+- **A narrowing beam.** A node expands `BRANCHING_BY_PLY[ply]` moves:
+  sixteen at the root, then four, three, and two from the fourth ply on.
+  Width matters where the move is chosen; deep down the line is already
+  committed. A flat width of ten cannot reach ten plies in half a second
+  — this is the single change that makes the depth possible, and those
+  widths are the widest that still get there.
+- **Transposition table.** Positions reached by different move orders
+  are the same position. Results are filed under a Zobrist key and
+  reused, including from one move of the game to the next, which is
+  worth about a ply.
+- **Principal variation search.** After the first move of a node, the
+  rest only have to prove they are *not* better, which a null window
+  does far more cheaply. Only the rare move that beats it is re-searched.
+- **Iterative deepening, two plies at a time.** Depth 2, then 4, then
+  6... keeping the best move of the last *completed* depth. Even depths
+  only: a leaf is scored right after somebody moved, so whoever moved
+  last always looks better than they are, and ending on the opponent's
+  reply cancels it. Halving the number of iterations pays for the
+  coarser steps, so the depth reached is the same either way.
 - **Incremental evaluation.** A full board scan per node is far too
   expensive, so the evaluator keeps one score per line and refreshes
   only the four lines a changed cell belongs to. Playing and taking back
@@ -135,16 +173,35 @@ returned by the deeper call. On top of the plain algorithm:
 - **Early exit** on a proven win or loss: a deeper search cannot say
   anything new.
 
+`make viz ARGS=--panels` measures every one of these by switching it off
+and running the same search again.
+
 ### Time control
 
 `TIME_BUDGET` in `ai/config.py` is the wall clock a move may spend
-thinking, a margin kept aside for the bookkeeping that follows the
-search. It is set to **0.85s**, for a move capped at 0.9s. Note that the
-42 subject asks for 0.5s per move: `TIME_BUDGET = 0.45` restores that,
-at the cost of roughly one ply of depth.
+thinking. It is set to **0.45s**, for a move capped at the 0.5s the
+subject asks for; the rest is the margin the bookkeeping after the
+search needs, since the deadline is only tested between nodes and the
+last one still has to finish.
 
-In practice the engine reaches depth 4 in the middlegame, and much
-deeper when the position is forcing.
+Measured over 32 positions taken from played-out games, the engine
+reaches **ten plies or more in almost every position that is not already
+decided**, and up to fourteen. The positions where it stops shallow are
+the ones where it proved a forced win and had no reason to go on.
+
+There is a real trade behind that, and it is worth stating plainly:
+width helps a static evaluation more than depth does, because extra
+plies mostly re-measure the same shapes. The same engine set ten moves
+wide at every ply reaches only four or five plies and still wins **18 of
+24 games** against this one. The subject grades depth, so depth is what
+the beam is tuned for; `BRANCHING_BY_PLY` in `ai/config.py` carries both
+settings and the measurements behind them, and switching is a one-line
+change.
+
+Measuring that is easy to get wrong. Both engines are deterministic, so
+a duel from a handful of fixed openings is a dozen fixed outcomes rather
+than a dozen samples: a 12-game run of the same pair gave the opposite
+answer to the 24-game run over varied openings.
 
 ### Watching it think
 
@@ -153,14 +210,33 @@ instead. Every move prints the depths as they complete, and the end of
 the session prints the deepest search reached:
 
 ```
-Black searching: 1 2 3 4   -> (8, 9) in 0.85s (depth 4)
-White searching: 1 2 3 4 5   -> (7, 10) in 0.61s (depth 5)
+Black searching: 2 4 6 8 10 12   -> (8, 9) in 0.45s (depth 12)
+White searching: 2 4 6 8 10   -> (7, 10) in 0.45s (depth 10)
 
-Engine: 26 moves searched, deepest search reached depth 5.
+Engine: 26 moves searched, deepest search reached depth 14.
 ```
 
-A move that ends early -- an opening move, or a forced win found at
-depth 3 -- simply lists fewer depths.
+Depths step by two because the search only ends on the opponent's reply.
+A move that ends early — an opening move, or a forced win found at depth
+4 — simply lists fewer depths.
+
+To see it think rather than read a running total, `make viz` opens the
+studio: one position, which you build by clicking intersections, and
+five chapters that each take it apart a different way. Every number in
+them is measured on that position when you look at it — nothing is
+stored, nothing is asserted.
+
+| Chapter | What it shows |
+| ------- | ------------- |
+| **1 Candidates** | The funnel from 361 intersections down to the moves actually searched. Click a stage to see it drawn on the goban, and the beam's width ply by ply underneath. |
+| **2 Alpha-beta** | The tree the search really walked. Click a move to follow it down; each node shows its alpha-beta window, which moves got a null window, which had to be re-searched, and which were generated but never looked at because a cutoff came first. |
+| **3 Deepening** | Space steps one more depth. The budget bar fills in, and the best move changes — or does not — as the depth grows. |
+| **4 Optimisations** | Click any row to switch that one optimisation off and re-run the same search on this position. Bars are drawn from 1x, so "costs time" runs left and "saves time" runs right. |
+| **5 Evaluation** | Click an empty intersection to see exactly what a stone there would be worth: the four lines through it, the shapes on each before and after, and the `DEFENCE_WEIGHT` applied to the opponent's half. |
+
+`make viz ARGS=--explore` is the smaller view of what the engine sees,
+and `make viz ARGS=--panels` a fixed report of the same measurements;
+`--save deck.pdf` writes that one out.
 
 ### Evaluation
 
@@ -212,18 +288,32 @@ Notable calls where reasonable people would disagree:
 - [x] **AI opponent** — minimax with alpha-beta pruning.
 - [x] **Move time cap** — iterative deepening keeps the best move of the
       last completed depth. `TIME_BUDGET`, in `ai/config.py`.
+- [x] **Ten plies deep** within the 0.5s cap, through a beam that
+      narrows with depth. See [Time control](#time-control).
+- [x] **Transposition table** — Zobrist-keyed, and kept from one move of
+      the game to the next.
 - [x] **Move suggestion / hint mode** — same engine, one call.
 - [x] **Human vs AI and AI vs AI modes**, colour choice at game start.
 - [x] **Performance display** — think time per move, per player.
+- [x] **`make viz`** — the studio: five interactive chapters taking one
+      position apart, every number measured live on it.
 
 ### Possible improvements
 
-- [ ] **Transposition table** — the same position is reached through
-      several move orders and is searched again every time.
-- [ ] **Threat-space search** — following forcing moves past the nominal
-      depth would find longer forced wins.
+- [ ] **Quiescence on threats** — the leaf evaluation still has no idea
+      a reply is coming, and stepping two plies at a time cancels the
+      bias without removing it. Extending forcing lines past the nominal
+      depth is the textbook fix and it was tried here: it lost **21-27**
+      over 48 games, and **42-54** over 96 including a 26-22 control.
+      The extension costs depth everywhere to fix a leaf that is only
+      sometimes wrong. Worth revisiting, but only with a way to extend
+      that does not spend the budget uniformly.
+- [ ] **Recovering the width** — the engine is tuned for depth because
+      the subject grades depth; a sharper evaluation would need less
+      width to play as well, and would close the gap.
 - [ ] **Tuning the pattern table** by self-play; the current values are
-      hand-picked, not fitted.
+      hand-picked, not fitted. This is the most promising of the three:
+      the evaluation, not the search, is what the engine is short of.
 
 
 ## Sanity checks
