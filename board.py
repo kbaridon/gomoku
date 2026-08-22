@@ -96,11 +96,15 @@ class Board:
         return n
 
     def find_all_alignments(self, color):
-        """Return every maximal alignment of length >= 5 for `color`.
+        """Return every five-in-a-row window held by `color`.
 
-        Each alignment is returned as a frozenset of (row, col) positions.
-        We de-duplicate by only starting a run at a cell whose predecessor
-        on the same axis is not `color`.
+        A run longer than five is returned as one window per five consecutive
+        stones it contains, not as a single block: a capture can take a run's
+        edge stone without touching a five sitting further inside it, so each
+        window has to stand or fall on its own for the win check to be sound.
+        Each window is a frozenset of (row, col) positions. We de-duplicate
+        runs by only starting one at a cell whose predecessor on the same
+        axis is not `color`.
         """
         alignments = []
         for r in range(self.size):
@@ -112,9 +116,10 @@ class Board:
                     if self.in_bounds(pr, pc) and self.get(pr, pc) == color:
                         continue
                     length = self._count_run(r, c, dr, dc, color)
-                    if length >= 5:
+                    for start in range(length - 4):
                         positions = frozenset(
-                            (r + i * dr, c + i * dc) for i in range(length)
+                            (r + (start + i) * dr, c + (start + i) * dc)
+                            for i in range(5)
                         )
                         alignments.append(positions)
         return alignments

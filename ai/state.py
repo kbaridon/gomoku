@@ -205,10 +205,12 @@ class SearchState:
     # ---------- alignments ----------
 
     def _alignments_through(self, r, c, color):
-        """Alignments of five or more created by the stone at (r, c).
+        """Five-in-a-row windows through the stone at (r, c).
 
         Only that stone can have created one, so the whole board never needs
-        to be scanned.
+        to be scanned. A run longer than five yields one window per five
+        consecutive stones it contains -- see `Board.find_all_alignments` for
+        why a run can't be treated as a single block.
         """
         grid = self.board.grid
         size = self.board.size
@@ -225,12 +227,15 @@ class SearchState:
             while 0 <= rr < size and 0 <= cc < size and grid[rr][cc] == color:
                 back += 1
                 rr, cc = rr - dr, cc - dc
-            if back + forward + 1 < ALIGNMENT_LENGTH:
+            length = back + forward + 1
+            if length < ALIGNMENT_LENGTH:
                 continue
-            alignments.append(frozenset(
-                (r + step * dr, c + step * dc)
-                for step in range(-back, forward + 1)
-            ))
+            for start in range(length - 4):
+                step0 = start - back
+                alignments.append(frozenset(
+                    (r + (step0 + i) * dr, c + (step0 + i) * dc)
+                    for i in range(5)
+                ))
         return alignments
 
 

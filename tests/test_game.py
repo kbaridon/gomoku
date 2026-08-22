@@ -121,6 +121,29 @@ def test_a_five_waits_when_the_opponent_could_still_win_by_capture():
     assert g.pending_alignment_owner == BLACK
 
 
+def test_a_capturable_edge_stone_does_not_save_the_row_behind_it():
+    """A run of six is two five-windows: capturing the run's edge stone can
+    leave the other five untouched, so it must not count as breaking the win.
+
+    Black has six in a row on row 9, cols 4-9. The left edge stone (9, 4) is
+    capturable through an unrelated vertical pair, but every stone of the
+    five-window on cols 5-9 is safe -- that window alone already decides the
+    game, so white must not get a turn at all.
+    """
+    g = Game()
+    for c in range(4, 10):
+        g.board.set(9, c, BLACK)
+    g.board.set(9, 9, 0)          # replay this one as the winning move
+    g.board.set(10, 4, BLACK)
+    g.board.set(8, 4, WHITE)      # white(8,4)-black(9,4)-black(10,4)-empty(11,4)
+
+    ok, _ = g.play(9, 9)
+    assert ok
+    assert g.winner == BLACK
+    assert g.win_reason == "alignment"
+    assert g.pending_alignment_owner is None
+
+
 def test_move_time_is_recorded():
     g = Game()
     g.play(9, 9)

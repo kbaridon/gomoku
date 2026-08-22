@@ -90,9 +90,13 @@ def test_find_all_alignments_none_when_only_four():
 
 
 def test_find_all_alignments_six_in_row():
+    """A run of six is two overlapping five-windows, not one six-stone block:
+    a capture can take the run's edge stone without breaking the other five."""
     b = Board()
     for c in range(5, 11):
         b.set(9, c, BLACK)
     alns = b.find_all_alignments(BLACK)
-    assert len(alns) == 1
-    assert len(alns[0]) == 6
+    assert len(alns) == 2
+    assert all(len(aln) == 5 for aln in alns)
+    assert frozenset((9, c) for c in range(5, 10)) in alns
+    assert frozenset((9, c) for c in range(6, 11)) in alns

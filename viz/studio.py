@@ -30,8 +30,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle
 from matplotlib.widgets import Button
 
-import ai.engine as engine
 from ai.config import DEFENCE_WEIGHT, TIME_BUDGET
+from ai.engine import MATE_FLOOR, WIN_VALUE
 from ai.lines import CELL_LINES, LINES
 from ai.patterns import score_line
 from ai.state import SearchState
@@ -82,6 +82,19 @@ def _bound(value):
     return _spaced(value)
 
 
+def _outcome(value):
+    """A search value in plain language: a raw score, or a proven mate.
+
+    A won or lost line is encoded as WIN_VALUE offset by how many plies away
+    the mate is, so the number itself (in the billions) is meaningless to
+    read -- what matters is who wins and how soon.
+    """
+    if abs(value) >= MATE_FLOOR:
+        plies = WIN_VALUE - abs(value)
+        return f"wins in {plies}" if value > 0 else f"loses in {plies}"
+    return _signed(value)
+
+
 def _plural(count, word, many=None):
     return f"{count} {word if count == 1 else (many or word + 's')}"
 
@@ -98,8 +111,10 @@ def _ms(seconds):
 
 def _card(ax, x, y, w, h, face=CARD, edge=CARD_BORDER, lw=0.9, z=2,
           alpha=1.0):
-    ax.add_patch(Rectangle((x, y), w, h, facecolor=face, edgecolor=edge,
-                           lw=lw, zorder=z, alpha=alpha))
+    patch = Rectangle((x, y), w, h, facecolor=face, edgecolor=edge,
+                      lw=lw, zorder=z, alpha=alpha)
+    ax.add_patch(patch)
+    return patch
 
 
 def _text(ax, x, y, body, size=9, color=TEXT_MAIN, weight="normal",
@@ -222,15 +237,21 @@ class Studio:
 
         The banner is painted straight onto the panel as it stands rather than
         by redrawing it, because redrawing a panel is what asks a chapter to
-        measure, and that is the very thing being waited for.
+        measure, and that is the very thing being waited for. It is removed
+        again once the work is done, so it never lingers as a stray artist
+        once the chapter draws its real result on top of the same axes.
         """
         ax = self.panel_ax
-        _card(ax, 62, 0.0, 38, 5.6, face=WARM, edge=WARM, z=20)
-        _text(ax, 81, 2.8, message, size=9.5, color=CARD, weight="bold",
-              ha="center", z=21)
+        patch = _card(ax, 62, 0.0, 38, 5.6, face=WARM, edge=WARM, z=20)
+        label = _text(ax, 81, 2.8, message, size=9.5, color=CARD,
+                      weight="bold", ha="center", z=21)
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
-        return function()
+        try:
+            return function()
+        finally:
+            patch.remove()
+            label.remove()
 
     # ---------- events ----------
 
@@ -494,9 +515,8 @@ class Candidates(Chapter):
 
     label = "1 Candidates"
     heading = "From 361 intersections to one move"
-    subtitle = ("each stage throws away what the next could not afford to "
-                "look at  ·  click a stage, or use up and down, to see it on "
-                "the goban")
+    subtitle = ("the highlighted stage is shown on the goban  ·  click any "
+                "stage, or use up and down, to move to it")
 
     STAGES = 6
 
@@ -606,71 +626,53 @@ class Candidates(Chapter):
             self._empty(ax, "Put some stones on the board.")
             return
         stages = self.data["stages"]
-        biggest = max(stage["count"] for stage in stages) or 1
-        top, height = 12.0, 7.2
+        y = 11.0
+        for index in range(self.STAGES):
+            if index == self.stage:
+                y = self._focus(ax, y, index, stages)
+            else:
+                y = self._collapsed(ax, y, index, stages[index])
+            y += 1.4
 
-        for index, stage in enumerate(stages):
-            y = top + index * height
-            live = index == self.stage
-            _card(ax, 0, y, PANEL_W, height - 0.8,
-                  face=CARD if live else BG, edge=ACCENT if live else RULE,
-                  lw=1.6 if live else 0.8)
-            self.studio.hot(0, y, PANEL_W, height - 0.8, index)
+        _text(
+            ax, 0, min(y + 1.2, 71.0),
+            f"stage 5 is the expensive one -- {_ms(self.data['per_candidate'])} "
+            f"a candidate -- so stages 1-4 exist only to shrink what it sees",
+            size=8.4, weight="bold", color=TEXT_MUTE)
 
-            # The bar follows the square root of the count. Linear would leave
-            # every stage after the second invisible, and what happens after
-            # the second stage is the whole story.
-            half = 11.5 * math.sqrt(stage["count"] / biggest)
-            centre, bar = 14.0, y + 1.4
-            ax.add_patch(Rectangle((centre - half, bar), 2 * half, 3.6,
-                                   facecolor=ACCENT if live else "#B9C9D6",
-                                   edgecolor="none", zorder=3))
-            _text(ax, centre + half + 1.4, bar + 1.8, f"{stage['count']}",
-                  size=11, weight="bold",
-                  color=TEXT_MAIN if live else TEXT_MUTE)
-            _text(ax, 0.6, y + height - 2.2, f"stage {index + 1}", size=6.6,
-                  color=TEXT_MUTE)
+    def _collapsed(self, ax, y, index, stage):
+        height = 5.4
+        _card(ax, 0, y, PANEL_W, height, face=BG, edge=RULE, lw=0.8)
+        self.studio.hot(0, y, PANEL_W, height, index)
+        middle = y + height / 2
+        _text(ax, 1.5, middle, f"stage {index + 1}", size=7.2,
+              color=TEXT_MUTE)
+        _text(ax, 15.0, middle, stage["title"], size=9.0, color=TEXT_MAIN)
+        _text(ax, PANEL_W - 1.5, middle, str(stage["count"]), size=10,
+              weight="bold", color=TEXT_MUTE, ha="right")
+        return y + height
 
-            _text(ax, 32, y + 2.1, stage["title"], size=10.5, weight="bold",
-                  color=TEXT_MAIN if live else TEXT_MUTE)
-            _paragraph(ax, 32, y + 4.6, stage["rule"], 100, size=7.6, step=2.3,
-                       limit=2)
-            if stage["seconds"] is not None:
-                _text(ax, PANEL_W - 0.5, y + 2.1, _ms(stage["seconds"]),
-                      size=9, weight="bold", color=WARM, ha="right")
+    def _focus(self, ax, y, index, stages):
+        stage = stages[index]
+        height = 18.4
+        _card(ax, 0, y, PANEL_W, height, face=CARD, edge=ACCENT, lw=2.0)
+        self.studio.hot(0, y, PANEL_W, height, index)
 
-        y = top + self.STAGES * height + 1.4
-        _text(ax, 0, y, "why that order", size=9.2, weight="bold")
-        _paragraph(
-            ax, 0, y + 3.2,
-            f"Stage 5 is the only one that puts a stone down, reads the "
-            f"evaluation and takes it back: {_ms(self.data['per_candidate'])} "
-            f"a candidate, so the whole goban would cost "
-            f"{_ms(self.data['whole_board_estimate'])} -- at every node of the "
-            f"tree. The four cheap stages exist so that stage 5 only ever sees "
-            f"{self.data['stages'][3]['count']} cells.",
-            134, size=8.0, step=2.5, limit=3)
+        _text(ax, 1.5, y + 3.0, f"stage {index + 1} of {self.STAGES}",
+              size=7.6, weight="bold", color=ACCENT)
+        _text(ax, 1.5, y + 7.2, stage["title"], size=13.5, weight="bold")
+        _paragraph(ax, 1.5, y + 11.0, stage["rule"], 80, size=8.2, step=2.6,
+                   limit=2)
 
-        self._beam(ax, 66.2)
-
-    def _beam(self, ax, y):
-        _text(ax, 0, y, "and the beam is narrower deeper down", size=9.2,
-              weight="bold")
-        _text(ax, 42, y, "moves a node expands, by its distance from the root",
-              size=7.4, color=TEXT_MUTE)
-        for ply in range(7):
-            x = ply * 9.4
-            width = engine._branching(ply)
-            first = ply == 0
-            _card(ax, x, y + 2.6, 8.0, 5.4, face=ACCENT if first else PALE,
-                  edge="none", z=3)
-            _text(ax, x + 4.0, y + 4.3, f"ply {ply}", size=6.4, ha="center",
-                  color=CARD if first else TEXT_MUTE)
-            _text(ax, x + 4.0, y + 6.5, str(width), size=9.5, weight="bold",
-                  ha="center", color=CARD if first else TEXT_MAIN)
-        _text(ax, 70, y + 5.3,
-              "wide where the move is chosen,\nthin where the line is only "
-              "being confirmed", size=7.4, color=TEXT_MUTE, va="center")
+        _text(ax, PANEL_W - 1.5, y + 5.6, str(stage["count"]), size=21,
+              weight="bold", color=ACCENT, ha="right")
+        if index > 0:
+            _text(ax, PANEL_W - 1.5, y + 10.0, f"of {stages[index - 1]['count']}",
+                  size=8.0, color=TEXT_MUTE, ha="right")
+        if stage["seconds"] is not None:
+            _text(ax, PANEL_W - 1.5, y + 14.4, _ms(stage["seconds"]),
+                  size=8.6, weight="bold", color=WARM, ha="right")
+        return y + height
 
     def click(self, key):
         if isinstance(key, int) and 0 <= key < self.STAGES:
@@ -687,16 +689,16 @@ class Candidates(Chapter):
 
 
 class AlphaBeta(Chapter):
-    """The recorded tree: which moves were searched, and which were cut."""
+    """One node of the recorded tree: its replies, ranked, searched or cut."""
 
     label = "2 Alpha-beta"
-    heading = "The tree it actually walked"
-    subtitle = ("click a move to follow it into the next node  ·  grey moves "
-                "were generated and never searched, because a cutoff came "
-                "first")
+    heading = "Why it plays what it plays"
+    subtitle = ("click a numbered reply -- on the goban or in the list -- to "
+                "see what happens after it  ·  shift-click to place a stone "
+                "instead")
 
-    COLUMNS = 3
-    TOP, BOTTOM = 28.0, 64.0
+    TOP, BOTTOM = 30.0, 63.0
+    BAR_LEFT, BAR_RIGHT = 44.0, 87.0
 
     def __init__(self, studio):
         super().__init__(studio)
@@ -720,6 +722,38 @@ class AlphaBeta(Chapter):
     def _chain(self):
         return [self.root] + [item["node"] for item in self.path]
 
+    def _node(self):
+        return self._chain()[-1]
+
+    def _mover(self):
+        """Whoever is to move at the node currently on screen."""
+        if not self.path:
+            return self.studio.to_play
+        nodes = [item["node"] for item in self.path]
+        return measure.replay(self.studio.position(), nodes).current
+
+    def _ranked(self, node):
+        """This node's replies, strongest first for the player moving here.
+
+        A cut move was never scored, so it has no place of its own in that
+        order; the cut moves keep the tail exactly as the search generated
+        them, after every reply that was actually searched.
+        """
+        searched = [item for item in node["moves"] if item["searched"]]
+        cut = [item for item in node["moves"] if not item["searched"]]
+        searched.sort(key=lambda item: item["node"]["value"], reverse=True)
+        return searched + cut
+
+    def _colour(self, item, rank):
+        if not item["searched"]:
+            return GREY
+        child = item["node"]
+        if child["wins"]:
+            return SUCCESS
+        if child["loses"]:
+            return DANGER
+        return SUCCESS if rank == 1 else ACCENT
+
     # -- goban --
 
     def board_state(self):
@@ -732,33 +766,38 @@ class AlphaBeta(Chapter):
     def overlay(self, ax, grid):
         if not self.root:
             return
-        node = self._chain()[-1]
-        for rank, item in enumerate(node["moves"], start=1):
+        node = self._node()
+        for rank, item in enumerate(self._ranked(node), start=1):
             r, c = item["move"]
             if grid[r][c] != EMPTY:
                 continue
-            searched = item["searched"]
-            self._mark(ax, r, c, str(rank), ACCENT if searched else GREY,
-                       alpha=1.0 if searched else 0.55,
-                       lw=1.6 if searched else 1.0)
+            self._mark(ax, r, c, str(rank), self._colour(item, rank),
+                       alpha=1.0 if item["searched"] else 0.5,
+                       lw=2.2 if rank == 1 else 1.4)
+
+    def board_click(self, cell, event):
+        if not self.root or event.key == "shift":
+            return False
+        for item in self._node()["moves"]:
+            if (item["move"] == cell and item["searched"]
+                    and item["node"]["children"]):
+                self.path = self.path + [item]
+                return True
+        return True  # swallow the click instead of moving a stone
 
     def note(self):
         if not self.root:
             return ["Put some stones on the board."]
-        node = self._chain()[-1]
-        if self.path:
-            played = "  ".join(f"{item['move']}" for item in self.path)
-            first = (f"The goban is the position after {played}; the red ring "
-                     f"is the last move of that line.")
-        else:
-            first = ("The goban is the position as it stands, the root of the "
-                     "tree.")
+        node = self._node()
+        first = ("The goban is the position as it stands." if not self.path
+                 else "The goban is the position after the replies chosen "
+                      "so far; the red ring marks the last one played.")
         lines = [first,
                  (ACCENT, _plural(len(node["moves"]) - node["pruned"], "move")
-                          + " searched at this node")]
+                          + " searched here")]
         if node["pruned"]:
             lines.append((GREY, _plural(node["pruned"], "move")
-                                + " generated and cut"))
+                                + " generated and skipped"))
         return lines
 
     # -- panel --
@@ -767,125 +806,113 @@ class AlphaBeta(Chapter):
         if not self.root:
             self._empty(ax, "Put some stones on the board.")
             return
-
+        node = self._node()
+        self._header(ax, node)
         self._controls(ax)
-        chain = self._chain()
-        shown = chain[-self.COLUMNS:]
-        offset = len(chain) - len(shown)
-        width = (PANEL_W - 2 * 2.0) / self.COLUMNS
-        for index, node in enumerate(shown):
-            self._column(ax, index * (width + 2.0), width, node,
-                         offset + index)
-        self._verdict(ax, chain[-1])
+        self._moves(ax, node)
+        self._verdict(ax, node)
+
+    def _header(self, ax, node):
+        mover = STONE_NAME[self._mover()]
+        title = ("root -- the position as it stands" if not self.path else
+                 "after " + " → ".join(str(item["move"])
+                                       for item in self.path))
+        _card(ax, 0, 11.0, PANEL_W, 9.4, face=CARD, edge=CARD_BORDER)
+        _text(ax, 1.5, 14.0, title, size=9.8, weight="bold")
+        _text(ax, 1.5, 17.8, f"{mover} to move here  ·  searched {self.depth} "
+                            f"plies deep", size=7.8, color=TEXT_MUTE)
+
+        ranked = self._ranked(node)
+        best = next((item for item in ranked if item["searched"]), None)
+        if best is not None:
+            value = best["node"]["value"]
+            _text(ax, PANEL_W - 1.5, 14.0, _outcome(value), size=15,
+                  weight="bold", ha="right",
+                  color=SUCCESS if value >= 0 else DANGER)
+            _text(ax, PANEL_W - 1.5, 17.8, f"best reply: {best['move']}",
+                  size=7.8, color=TEXT_MUTE, ha="right")
+        else:
+            _text(ax, PANEL_W - 1.5, 15.4, "a leaf -- scored, not searched",
+                  size=8.4, color=TEXT_MUTE, ha="right")
 
     def _controls(self, ax):
-        crumbs = " → ".join(["root"] + [f"{item['move']}"
-                                        for item in self.path])
-        _text(ax, 0, 13.6, crumbs, size=8.6, weight="bold", color=ACCENT)
-        _text(ax, 0, 16.6,
-              f"{len(self._chain()) - 1} plies down, of the {self.depth} this "
-              f"iteration searched", size=7.4, color=TEXT_MUTE)
-
-        for body, key, x in (("–", "shallower", 59.0), ("+", "deeper", 77.0)):
-            _card(ax, x, 11.0, 5.0, 5.2, face=CARD, edge=CARD_BORDER)
-            _text(ax, x + 2.5, 13.6, body, size=12, weight="bold", ha="center")
-            self.studio.hot(x, 11.0, 5.0, 5.2, key)
-        _text(ax, 71.0, 13.6, f"depth {self.depth}", size=9, weight="bold",
-              ha="center")
-        _card(ax, 83, 11.0, 15, 5.2, face=CARD, edge=ACCENT, lw=1.2)
-        _text(ax, 90.5, 13.6, "back to root", size=8.2, ha="center",
-              color=ACCENT)
-        self.studio.hot(83, 11.0, 15, 5.2, "root")
-
-    def _column(self, ax, x, width, node, level):
-        rows = node["moves"]
-        window = node["window"]
-        title = ("root" if node.get("is_root")
-                 else f"after {node['move']}  ·  ply {node['ply'] + 1}")
-        _text(ax, x, 20.0, title, size=9.4, weight="bold")
-        if window:
-            _text(ax, x, 23.2, f"α {_bound(window[0])}", size=7.4, color=WARM)
-            _text(ax, x + width, 23.2, f"β {_bound(window[1])}", size=7.4,
-                  color=WARM, ha="right")
-        else:
-            _text(ax, x, 23.2, "a leaf: scored, never expanded", size=7.4,
-                  color=TEXT_MUTE)
-        searched = len(rows) - node["pruned"]
-        if node["pruned"] and node["children"]:
-            tail = f"cut at {_spaced(node['children'][-1]['value'])} ≥ β"
-            colour = DANGER
-        elif rows:
-            tail = f"beam {engine._branching(node['ply'] + 1)}"
-            colour = TEXT_MUTE
-        else:
-            tail, colour = "", TEXT_MUTE
-        _text(ax, x, 26.0, f"{searched} of {len(rows)} searched", size=7.4,
+        y = 21.6
+        for body, key, x in (("–", "shallower", 0.0), ("+", "deeper", 7.0)):
+            _card(ax, x, y, 4.6, 4.8, face=SOFT, edge=CARD_BORDER)
+            _text(ax, x + 2.3, y + 2.4, body, size=11, weight="bold",
+                  ha="center")
+            self.studio.hot(x, y, 4.6, 4.8, key)
+        _text(ax, 15.0, y + 2.4, f"search depth {self.depth}", size=7.8,
               color=TEXT_MUTE)
-        if tail:
-            _text(ax, x + width, 26.0, tail, size=7.4, color=colour,
-                  ha="right")
+        if self.path:
+            _card(ax, 86, y, 14, 4.8, face=SOFT, edge=ACCENT, lw=1.1)
+            _text(ax, 93, y + 2.4, "◂ back", size=8.2, ha="center",
+                  color=ACCENT)
+            self.studio.hot(86, y, 14, 4.8, "back")
 
-        if not rows:
+    def _moves(self, ax, node):
+        ranked = self._ranked(node)
+        if not ranked:
             return
         room = self.BOTTOM - self.TOP
-        height = max(min(3.0, room / len(rows)), 2.2)
-        fits = int(room / height)
-        size = 8.2 if height >= 2.7 else 7.2
-        following = (self.path[level]["move"]
-                     if level < len(self.path) else None)
+        height = max(min(4.6, room / len(ranked)), 2.8)
+        fits = max(1, int(room / height))
 
-        for order, item in enumerate(rows[:fits]):
+        values = [item["node"]["value"] for item in ranked
+                 if item["searched"]]
+        lo, hi = (min(values), max(values)) if values else (0, 1)
+        span = (hi - lo) or 1
+
+        _text(ax, 0, self.TOP - 2.4,
+              f"longer bar = stronger for {STONE_NAME[self._mover()]}  ·  "
+              "green is the reply it plays",
+              size=7.4, color=TEXT_MUTE)
+
+        for order, item in enumerate(ranked[:fits]):
             y = self.TOP + order * height
+            rank = order + 1
             searched = item["searched"]
-            on_path = item["move"] == following
-            _card(ax, x, y, width, height - 0.45,
+            colour = self._colour(item, rank)
+            _card(ax, 0, y, PANEL_W, height - 0.6,
                   face=CARD if searched else BG,
-                  edge=ACCENT if on_path else (CARD_BORDER if searched
-                                               else RULE),
-                  lw=1.6 if on_path else 0.8)
-            ax.add_patch(Rectangle((x, y), 0.9, height - 0.45, zorder=3,
-                                   facecolor=ACCENT if searched else GREY,
-                                   edgecolor="none"))
-            middle = y + (height - 0.45) / 2
-            _text(ax, x + 2.0, middle, f"{order + 1}", size=6.2,
-                  color=TEXT_MUTE)
-            _text(ax, x + 5.4, middle, f"{item['move']}", size=size,
-                  color=TEXT_MAIN if searched else GREY,
-                  weight="bold" if on_path else "normal")
+                  edge=CARD_BORDER if searched else RULE, lw=0.8)
+            middle = y + (height - 0.6) / 2
+            _text(ax, 1.5, middle, str(rank), size=7.2, color=TEXT_MUTE)
+            _text(ax, 6.0, middle, f"{item['move']}", size=8.6,
+                  weight="bold" if rank == 1 else "normal",
+                  color=TEXT_MAIN if searched else GREY)
+
             if searched:
-                _text(ax, x + width - 1.0, middle,
-                      _spaced(item["node"]["value"]), size=size - 0.4,
-                      ha="right")
+                value = item["node"]["value"]
+                frac = max(0.05, (value - lo) / span)
+                width = (self.BAR_RIGHT - self.BAR_LEFT) * frac
+                ax.add_patch(Rectangle((self.BAR_LEFT, y + 0.5), width,
+                                       height - 1.6, facecolor=colour,
+                                       edgecolor="none", zorder=3))
+                _text(ax, self.BAR_RIGHT + 1.5, middle, _outcome(value),
+                      size=7.6, ha="left", color=TEXT_MAIN)
+                tag = self._tag(item)
+                if tag:
+                    _text(ax, self.BAR_LEFT - 1.0, middle, tag, size=7.0,
+                          color=colour, ha="right", weight="bold")
+                if item["node"]["children"]:
+                    self.studio.hot(0, y, PANEL_W, height - 0.6,
+                                    ("open", item["move"]))
             else:
-                _text(ax, x + width - 1.0, middle, "cut", size=size - 0.4,
-                      color=GREY, ha="right", style="italic")
-            tag = self._tag(node, item)
-            if tag:
-                _text(ax, x + 13.6, middle, tag, size=6.2, color=WARM)
-            if searched and item["node"]["children"]:
-                self.studio.hot(x, y, width, height - 0.45,
-                                ("open", level, item["move"]))
-        if len(rows) > fits:
-            _text(ax, x, self.TOP + fits * height + 1.4,
-                  f"...and {len(rows) - fits} more", size=7.2,
+                _text(ax, self.BAR_LEFT, middle, "generated, never searched",
+                      size=7.4, color=GREY, style="italic")
+
+        if len(ranked) > fits:
+            _text(ax, 0, self.TOP + fits * height + 1.6,
+                  f"...and {len(ranked) - fits} more, all cut", size=7.2,
                   color=TEXT_MUTE)
 
-    def _tag(self, node, item):
+    def _tag(self, item):
         child = item["node"]
-        if child is None:
-            return ""
         if child["wins"]:
             return "wins"
         if child["loses"]:
             return "loses"
-        if node.get("table_move") == item["move"]:
-            return "table move"
-        if child["research"]:
-            return "re-searched"
-        if child["extended"]:
-            return "extended"
-        if item["probe"] is not None:
-            return "null window"
         return ""
 
     def _verdict(self, ax, node):
@@ -894,31 +921,30 @@ class AlphaBeta(Chapter):
         window = node["window"]
         if node["pruned"] and node["children"]:
             last = node["children"][-1]
-            body = (
-                f"This node stopped early. Its window was α "
-                f"{_bound(window[0])} to β {_bound(window[1])}; "
-                f"{last['move']} came back {_spaced(last['value'])}, which is "
-                f"at least β. Whatever the "
-                f"{_plural(node['pruned'], 'remaining move')} is worth, the "
-                f"player one ply up would never let this "
-                f"position happen, so searching them could not change the "
-                f"answer.")
+            tail = (f"so the {_plural(node['pruned'], 'move left')} could "
+                    f"not change what happens one ply up, and were never "
+                    f"searched.")
+            if abs(last["value"]) >= MATE_FLOOR:
+                body = (f"Stopped early: {last['move']} already "
+                        f"{_outcome(last['value'])} -- {tail}")
+            else:
+                body = (f"Stopped early: {last['move']} already scores "
+                        f"{_spaced(last['value'])}, past β "
+                        f"({_bound(window[1])}) -- {tail}")
         elif window is None:
-            body = ("A leaf. At the last ply the static score of the position "
-                    "after the move is the value, so nothing below it is "
-                    "generated at all -- unless the move is forcing, and then "
-                    "one more ply is bought to see the reply to it.")
+            body = ("A leaf: the last ply, so this position is scored as it "
+                    "stands instead of being searched further.")
         else:
-            body = ("Nothing was cut here: either every move in turn improved "
-                    "on the last, or none of them beat β, so the node had to "
-                    "look at all of them. The root is always like this -- "
-                    "there is no better sibling to be compared against yet.")
-        _paragraph(ax, 2, y + 3.0, body, 128, size=8.1, step=2.6, limit=3,
+            body = ("Nothing to cut: every move here either beat the one "
+                    "before it or stayed under β, so all of them had to be "
+                    "searched.")
+        _paragraph(ax, 2, y + 3.4, body, 128, size=8.6, step=2.9, limit=3,
                    color=TEXT_MAIN)
 
     def click(self, key):
-        if key == "root":
-            self.path = []
+        if key == "back":
+            if self.path:
+                self.path.pop()
             return True
         if key in ("deeper", "shallower"):
             self.depth = max(2, min(10, self.depth
@@ -927,10 +953,10 @@ class AlphaBeta(Chapter):
             self.ensure()
             return True
         if isinstance(key, tuple) and key[0] == "open":
-            _, level, move = key
-            for item in self._chain()[level]["moves"]:
+            move = key[1]
+            for item in self._node()["moves"]:
                 if item["move"] == move and item["searched"]:
-                    self.path = self.path[:level] + [item]
+                    self.path = self.path + [item]
                     return True
         return False
 
@@ -1030,22 +1056,32 @@ class Deepening(Chapter):
         self._table(ax)
 
     def _buttons(self, ax):
+        kept = [row for row in self.rows if not row["cut"]]
+        if kept:
+            last = kept[-1]
+            _text(ax, 0, 13.2, f"plays {last['move']}", size=13,
+                  weight="bold", color=SUCCESS)
+            _text(ax, 0, 17.2,
+                  f"depth {last['depth']}  ·  {_outcome(last['value'])}",
+                  size=8.0, color=TEXT_MUTE)
+        else:
+            _text(ax, 0, 14.6, "not searched yet", size=9.5, color=TEXT_MUTE)
+
         for body, key, x in (("Step one depth", "step", 58.0),
                              ("Run to the end", "run", 79.0)):
             _card(ax, x, 11.0, 19.0, 5.2, face=CARD, edge=ACCENT, lw=1.3)
             _text(ax, x + 9.5, 13.6, body, size=8.5, weight="bold",
                   ha="center", color=ACCENT)
             self.studio.hot(x, 11.0, 19.0, 5.2, key)
-        if self.done:
-            _text(ax, 0, 13.6, "the budget is spent", size=8.6, color=SUCCESS,
-                  weight="bold")
 
     def _clock(self, ax):
         budget = self.studio.budget
         top, height = 21.5, 5.4
-        _text(ax, 0, 19.4,
-              f"the {budget:.2f} s budget, filled in by the depths that "
-              f"finished", size=8.6, weight="bold")
+        label = (f"the {budget:.2f} s budget, filled in by the depths that "
+                f"finished")
+        if self.done:
+            label += "  --  fully spent"
+        _text(ax, 0, 19.4, label, size=8.6, weight="bold")
         _card(ax, 0, top, PANEL_W, height, face=SOFT, edge=CARD_BORDER)
 
         spent = 0.0
@@ -1118,7 +1154,7 @@ class Deepening(Chapter):
             if changed:
                 _text(ax, 66, y + 2.1, "changed its mind", size=7.2,
                       color=ACCENT)
-            _text(ax, PANEL_W - 1, y + 2.1, _spaced(row["value"]), size=7.8,
+            _text(ax, PANEL_W - 1, y + 2.1, _outcome(row["value"]), size=7.8,
                   ha="right")
             previous = row["move"]
 
@@ -1169,7 +1205,7 @@ class Optimisations(Chapter):
     # two orders of magnitude: drawn linearly, every bar under 2x would be a
     # smear against the edge and a 0.5x would look much like a 1x.
     LOW, HIGH, LEFT, RIGHT = 0.5, 32.0, 52.0, 97.0
-    TOP, HEIGHT = 25.5, 4.6
+    TOP, HEIGHT = 28.5, 4.6
 
     def __init__(self, studio):
         super().__init__(studio)
@@ -1251,20 +1287,21 @@ class Optimisations(Chapter):
         rows = self._rows()
         bottom = self.TOP + len(rows) * self.HEIGHT
 
-        _card(ax, 0, 11.0, 60, 6.0, face=CARD, edge=CARD_BORDER)
+        _card(ax, 0, 11.0, 60, 9.0, face=CARD, edge=CARD_BORDER)
         if self.baseline:
-            _text(ax, 1.5, 14.0,
-                  f"as it stands, depth {self.DEPTH}:   "
-                  f"{_ms(self.baseline['seconds'])}   ·   "
-                  f"{_spaced(self.baseline['nodes'])} nodes", size=8.8,
-                  weight="bold")
-        else:
-            _text(ax, 1.5, 14.0, "nothing measured yet", size=8.8,
+            _text(ax, 1.5, 15.2, _ms(self.baseline["seconds"]), size=17,
+                  weight="bold", color=ACCENT)
+            _text(ax, 1.5, 19.0,
+                  f"as it stands, depth {self.DEPTH}  ·  "
+                  f"{_spaced(self.baseline['nodes'])} nodes", size=7.8,
                   color=TEXT_MUTE)
-        _card(ax, 62, 11.0, 36, 6.0, face=CARD, edge=ACCENT, lw=1.3)
-        _text(ax, 80, 14.0, "measure every row", size=8.8, weight="bold",
+        else:
+            _text(ax, 1.5, 15.5, "nothing measured yet", size=9.5,
+                  color=TEXT_MUTE)
+        _card(ax, 62, 11.0, 36, 9.0, face=CARD, edge=ACCENT, lw=1.3)
+        _text(ax, 80, 15.5, "measure every row", size=8.8, weight="bold",
               ha="center", color=ACCENT)
-        self.studio.hot(62, 11.0, 36, 6.0, "all")
+        self.studio.hot(62, 11.0, 36, 9.0, "all")
 
         self._scale(ax, bottom)
         for index, (key, name, detail) in enumerate(rows):
@@ -1285,27 +1322,24 @@ class Optimisations(Chapter):
                       color=ACCENT, style="italic", z=6)
 
         _paragraph(
-            ax, 0, bottom + 2.2,
-            "A bar shorter than 1x is honest, not a slip. At a fixed depth "
-            "the transposition table finds few repeats and its lookup is pure "
-            "overhead, while forced replies and the tactical promotion buy "
-            "correctness rather than speed -- they exist so the engine sees "
-            "the winning move at all. Their worth shows in games won and in "
-            "depth reached under a time budget, not on this row.",
-            134, size=7.9, step=2.5, limit=4)
+            ax, 0, bottom + 2.4,
+            "A bar under 1x is real, not a mistake: some of these rows pay "
+            "for correctness, not speed, and only show their worth in games "
+            "won -- not in the time this one search takes.",
+            134, size=8.4, step=2.7, limit=2)
 
     def _scale(self, ax, bottom):
-        _text(ax, self.LEFT, 20.0,
+        _text(ax, self.LEFT, 23.0,
               "how long the same search takes without it", size=7.4,
               color=TEXT_MUTE)
         for tick in (0.5, 1, 2, 4, 8, 16, 32):
             x = self._at(tick)
-            ax.plot([x, x], [23.4, bottom], color=RULE, lw=0.7, zorder=1,
+            ax.plot([x, x], [26.4, bottom], color=RULE, lw=0.7, zorder=1,
                     linestyle=(0, (2, 3)))
-            _text(ax, x, 22.2, f"{tick:g}x", size=6.6, color=TEXT_MUTE,
+            _text(ax, x, 25.2, f"{tick:g}x", size=6.6, color=TEXT_MUTE,
                   ha="center")
         one = self._at(1.0)
-        ax.plot([one, one], [23.4, bottom], color=TEXT_MUTE, lw=1.1, zorder=3)
+        ax.plot([one, one], [26.4, bottom], color=TEXT_MUTE, lw=1.1, zorder=3)
 
     def _bar(self, ax, y, done):
         one, end = self._at(1.0), self._at(done["cost"])
@@ -1472,13 +1506,11 @@ class Evaluation(Chapter):
             self._line(ax, self.TOP + index * self.HEIGHT, row, data["color"])
 
         _paragraph(
-            ax, 0, self.TOP + len(data["rows"]) * self.HEIGHT + 0.8,
-            "That is the whole evaluation. Every line of the goban carries a "
-            "score for each colour, and a move can only touch the lines it "
-            "sits on, so the running total is repaired rather than rebuilt -- "
-            f"and the opponent's side of it weighs {DEFENCE_WEIGHT} times "
-            "one's own, because losing the tempo costs more than gaining it "
-            "pays.", 134, size=7.9, step=2.5, limit=3)
+            ax, 0, self.TOP + len(data["rows"]) * self.HEIGHT + 1.0,
+            "That is the whole evaluation: add up every line the move "
+            f"touches, and count the opponent's lines {DEFENCE_WEIGHT} times "
+            "over, since losing ground costs more than gaining it pays.",
+            134, size=8.4, step=2.7, limit=2)
 
     def _line(self, ax, y, row, color):
         _card(ax, 0, y, PANEL_W, self.HEIGHT - 1.0, face=CARD,
